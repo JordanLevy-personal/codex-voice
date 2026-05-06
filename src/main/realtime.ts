@@ -109,6 +109,7 @@ function realtimeInstructions(): string {
     "- Ask a short clarification only when the user's request is too ambiguous to hand to Codex safely.",
     "- Let the user interrupt you naturally.",
     "- When Codex needs approval, ask the user plainly before approving or declining. Mention the concrete command, file change, app/tool, or question when it is available.",
+    "- If Codex asks to use an MCP server or app-server tool and the user says yes, allow it, or go ahead, call answer_codex_approval with decision accept.",
     "- If the user says yes, allow it, go ahead, or similar while Codex is waiting for approval, call answer_codex_approval with decision accept.",
     "- If the user says allow for this session, always allow during this session, or similar, call answer_codex_approval with decision acceptForSession.",
     "- If the user says no, do not allow, or decline, call answer_codex_approval with decision decline.",
@@ -192,7 +193,7 @@ function realtimeTools(): unknown[] {
       type: "function",
       name: "answer_codex_approval",
       description:
-        "Answer a pending Codex approval or permission request after the user grants, denies, or cancels it by voice. If requestId is omitted, the app will use the only pending approval when there is exactly one.",
+        "Answer a pending Codex approval, permission, MCP elicitation, auth, or app-server tool request after the user grants, denies, or cancels it by voice. If requestId is omitted, the app will use the only pending approval-style request when there is exactly one.",
       parameters: {
         type: "object",
         properties: {

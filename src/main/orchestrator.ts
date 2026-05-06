@@ -435,7 +435,7 @@ export class VoiceCodexOrchestrator extends EventEmitter {
     const request = this.pendingRequests.get(String(requestId));
     if (!request) throw new Error(`Unknown pending request: ${requestId}`);
 
-    const response = responseForDecision(request, decision);
+    const response = await this.responseForDecision(request, decision);
     if (response.kind === "error") {
       this.codex.rejectRequest(requestId, response.message);
     } else {
@@ -451,6 +451,119 @@ export class VoiceCodexOrchestrator extends EventEmitter {
       decision,
     });
     this.emitState();
+  }
+
+  private async responseForDecision(
+    request: PendingCodexRequest,
+    decision: ApprovalDecision,
+  ): Promise<ServerRequestResponse> {
+    if (request.method === "item/tool/call") {
+      return this.responseForDynamicToolCall(request, decision);
+    }
+    if (request.method === "account/chatgptAuthTokens/refresh" && isAcceptDecision(decision)) {
+      return this.responseForChatgptAuthRefresh(request);
+    }
+    return responseForDecision(request, decision);
+  }
+
+  private async responseForDynamicToolCall(
+    request: PendingCodexRequest,
+    decision: ApprovalDecision,
+  ): Promise<ServerRequestResponse> {
+    if (!isAcceptDecision(decision)) {
+      return {
+        kind: "result",
+        result: {
+          success: false,
+          contentItems: [
+            {
+              type: "inputText",
+              text: `User ${decision === "cancel" ? "cancelled" : "declined"} the requested tool call.`,
+            },
+          ],
+        },
+      };
+    }
+
+    const params = request.raw as {
+      params?: {
+        threadId?: unknown;
+        namespace?: unknown;
+        tool?: unknown;
+        arguments?: unknown;
+      };
+    };
+    const threadId = stringField(params.params?.threadId);
+    const server = stringField(params.params?.namespace);
+    const tool = stringField(params.params?.tool);
+
+    if (!threadId || !server || !tool) {
+      return {
+        kind: "result",
+        result: {
+          success: false,
+          contentItems: [
+            {
+              type: "inputText",
+              text: "The app-server tool call did not include enough MCP routing information to run it.",
+            },
+          ],
+        },
+      };
+    }
+
+    try {
+      const result = await this.codex.request("mcpServer/tool/call", {
+        threadId,
+        server,
+        tool,
+        ...(params.params?.arguments !== undefined ? { arguments: params.params.arguments } : {}),
+      });
+      return dynamicToolResponseFromMcpResult(result);
+    } catch (error) {
+      return {
+        kind: "result",
+        result: {
+          success: false,
+          contentItems: [
+            {
+              type: "inputText",
+              text: `MCP tool call failed: ${error instanceof Error ? error.message : String(error)}`,
+            },
+          ],
+        },
+      };
+    }
+  }
+
+  private async responseForChatgptAuthRefresh(request: PendingCodexRequest): Promise<ServerRequestResponse> {
+    const params = request.raw as { params?: { previousAccountId?: unknown } };
+    const previousAccountId = stringField(params.params?.previousAccountId);
+
+    try {
+      const authStatus = (await this.codex.request("getAuthStatus", {
+        includeToken: true,
+        refreshToken: true,
+      })) as { authToken?: string | null };
+      const accountResponse = (await this.codex.request("account/read", {
+        refreshToken: true,
+      })) as { account?: { type?: string; planType?: string | null } | null };
+      const token = stringField(authStatus.authToken);
+      if (!token || !previousAccountId) {
+        return responseForDecision(request, "decline");
+      }
+      return {
+        kind: "result",
+        result: {
+          accessToken: token,
+          chatgptAccountId: previousAccountId,
+          chatgptPlanType:
+            accountResponse.account?.type === "chatgpt" ? accountResponse.account.planType ?? null : null,
+        },
+      };
+    } catch {
+      return responseForDecision(request, "decline");
+    }
   }
 
   async answerToolQuestion(requestId: string | number, answers: ToolQuestionAnswer[]): Promise<void> {
@@ -1374,13 +1487,13 @@ function describeServerRequest(message: CodexJsonMessage): PendingCodexRequest {
       threadId: stringField(params.threadId),
       turnId: stringField(params.turnId),
       itemId: stringField(params.callId),
-      title: "Unsupported tool call",
+      title: "Tool call approval needed",
       subtitle: stringField(params.tool),
       body: stringField(params.tool)
-        ? `Codex requested dynamic tool call: ${stringField(params.tool)}`
-        : "Codex requested a dynamic tool call this app cannot service yet.",
+        ? `Codex wants to use ${[stringField(params.namespace), stringField(params.tool)].filter(Boolean).join(".")}.`
+        : "Codex wants to use a dynamic app-server tool.",
       details,
-      options: ["cancel"],
+      options: ["accept", "decline", "cancel"],
       raw: message,
     };
   }
@@ -1398,7 +1511,7 @@ function describeServerRequest(message: CodexJsonMessage): PendingCodexRequest {
         detail("Reason", stringField(params.reason)),
         detail("Previous account", stringField(params.previousAccountId)),
       ]),
-      options: ["cancel"],
+      options: ["accept", "decline", "cancel"],
       raw: message,
     };
   }
@@ -1590,6 +1703,10 @@ type ServerRequestResponse =
   | { kind: "result"; result: unknown }
   | { kind: "error"; message: string };
 
+function isAcceptDecision(decision: ApprovalDecision): boolean {
+  return decision === "accept" || decision === "acceptForSession";
+}
+
 function responseForDecision(request: PendingCodexRequest, decision: ApprovalDecision): ServerRequestResponse {
   const method = request.method;
   if (method === "execCommandApproval" || method === "applyPatchApproval") {
@@ -1642,6 +1759,56 @@ function responseForDecision(request: PendingCodexRequest, decision: ApprovalDec
     };
   }
   return { kind: "error", message: `Unsupported Codex server request method: ${method}` };
+}
+
+function dynamicToolResponseFromMcpResult(result: unknown): ServerRequestResponse {
+  const response = result as {
+    content?: unknown;
+    structuredContent?: unknown;
+    isError?: boolean;
+  };
+  const contentItems = Array.isArray(response.content)
+    ? response.content.map(dynamicContentItemFromMcpContent)
+    : [];
+  if (response.structuredContent !== undefined && response.structuredContent !== null) {
+    contentItems.push({
+      type: "inputText",
+      text: describeJsonValue(response.structuredContent) ?? String(response.structuredContent),
+    });
+  }
+  if (contentItems.length === 0) {
+    contentItems.push({
+      type: "inputText",
+      text: response.isError ? "MCP tool returned an error with no content." : "MCP tool completed with no content.",
+    });
+  }
+  return {
+    kind: "result",
+    result: {
+      success: response.isError !== true,
+      contentItems,
+    },
+  };
+}
+
+function dynamicContentItemFromMcpContent(content: unknown): { type: "inputText"; text: string } | { type: "inputImage"; imageUrl: string } {
+  if (content && typeof content === "object") {
+    const record = content as Record<string, unknown>;
+    if (record.type === "text" && typeof record.text === "string") {
+      return { type: "inputText", text: record.text };
+    }
+    if (record.type === "image") {
+      const imageUrl = stringField(record.imageUrl);
+      if (imageUrl) return { type: "inputImage", imageUrl };
+      const data = stringField(record.data);
+      const mimeType = stringField(record.mimeType) ?? "image/png";
+      if (data) return { type: "inputImage", imageUrl: `data:${mimeType};base64,${data}` };
+    }
+  }
+  return {
+    type: "inputText",
+    text: describeJsonValue(content) ?? String(content),
+  };
 }
 
 function normalizeToolQuestionAnswers(
