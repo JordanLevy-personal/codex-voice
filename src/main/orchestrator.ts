@@ -4,7 +4,9 @@ import type {
   AppState,
   ApprovalDecision,
   CodexActionResult,
+  CodexChatRuntime,
   CodexModelSummary,
+  VoiceChat,
   CodexSettings,
   CodexSettingsScope,
   CodexThreadTokenUsage,
@@ -25,6 +27,12 @@ type TurnWaiter = {
   timeout: NodeJS.Timeout;
 };
 
+type ChatContext = {
+  session: VoiceSession;
+  chat: VoiceChat;
+  recovered?: boolean;
+};
+
 type ReviewTarget =
   | { type: "uncommittedChanges" }
   | { type: "baseBranch"; branch: string }
@@ -33,10 +41,7 @@ type ReviewTarget =
 
 export class VoiceCodexOrchestrator extends EventEmitter {
   private activeSessionId: string | null = null;
-  private activeCodexThreadId: string | null = null;
-  private activeTurnId: string | null = null;
-  private activeTurnModel: string | null = null;
-  private activeTurnReasoningEffort: ReasoningEffort | null = null;
+  private showSessionChatsFlag = false;
   private nextTurnModel: string | null = null;
   private nextTurnReasoningEffort: ReasoningEffort | null = null;
   private defaultModel: string | null = null;
@@ -45,6 +50,10 @@ export class VoiceCodexOrchestrator extends EventEmitter {
   private status = "Starting Codex app-server.";
   private pendingRequests = new Map<string, PendingCodexRequest>();
   private turnWaiters = new Map<string, TurnWaiter>();
+  private activeTurnByThread = new Map<string, string>();
+  private activeTurnModelByThread = new Map<string, string | null>();
+  private activeTurnReasoningEffortByThread = new Map<string, ReasoningEffort | null>();
+  private threadByTurn = new Map<string, string>();
   private tokenUsageByThread = new Map<string, CodexThreadTokenUsage>();
   private threadStatusByThread = new Map<string, string>();
 
@@ -78,14 +87,21 @@ export class VoiceCodexOrchestrator extends EventEmitter {
 
   async state(): Promise<AppState> {
     const sessions = await this.store.listSessions();
-    const activeSession = this.activeSessionId
+    const archivedSessions = await this.store.listArchivedSessions();
+    let activeSession = this.activeSessionId
       ? sessions.find((session) => session.id === this.activeSessionId) ?? null
       : null;
+    if (this.activeSessionId && !activeSession) {
+      this.activeSessionId = null;
+      this.showSessionChatsFlag = false;
+      activeSession = null;
+    }
     return {
       baseFolder: this.store.baseFolder,
       sessions,
+      archivedSessions,
       activeSession,
-      runtime: this.runtimeState(),
+      runtime: this.runtimeState(activeSession),
       codexSettings: this.codexSettings(activeSession),
       realtime: realtimeConfig(),
     };
@@ -107,14 +123,9 @@ export class VoiceCodexOrchestrator extends EventEmitter {
       throw new Error("Codex did not return a thread id.");
     }
 
-    const updated = await this.store.upsertSession({
-      ...session,
-      codexThreadId,
-      lastStatus: "Codex thread started.",
-    });
+    const updated = await this.store.addChat(session.id, "Main task", codexThreadId);
     this.activeSessionId = updated.id;
-    this.activeCodexThreadId = updated.codexThreadId;
-    this.activeTurnId = null;
+    this.showSessionChatsFlag = false;
     this.status = `Active session: ${updated.displayName}`;
     this.emitEvent("app", "sessionCreated", `Created session "${updated.displayName}".`, updated);
     this.emitState();
@@ -122,35 +133,137 @@ export class VoiceCodexOrchestrator extends EventEmitter {
   }
 
   async resumeSession(sessionId: string): Promise<VoiceSession> {
-    const session = await this.store.getSession(sessionId);
+    let session = await this.store.getSession(sessionId);
     if (!session) throw new Error(`Unknown session: ${sessionId}`);
-    if (!session.codexThreadId) {
-      throw new Error(`Session "${session.displayName}" does not have a Codex thread id.`);
+    let chat = activeChatForSession(session);
+    if (!chat?.codexThreadId) {
+      const updated = await this.startChatThread(session, "Main task");
+      this.activeSessionId = updated.id;
+      this.showSessionChatsFlag = false;
+      this.status = `Created a new chat for session: ${updated.displayName}`;
+      this.emitEvent("app", "sessionResumed", this.status, updated);
+      this.emitState();
+      return updated;
     }
 
-    await this.codex.request("thread/resume", {
-      threadId: session.codexThreadId,
-      cwd: session.folderPath,
-      approvalPolicy: "on-request",
-      sandbox: "workspace-write",
-      personality: "friendly",
-      excludeTurns: true,
-      ...(session.model ? { model: session.model } : {}),
-    });
+    const resumed = await this.resumeChatThread(session, chat);
 
-    const updated = await this.store.updateSession(session.id, {
-      lastStatus: "Codex thread resumed.",
+    const updated = await this.store.updateSession(resumed.session.id, {
+      activeChatId: resumed.chat.id,
+      codexThreadId: resumed.chat.codexThreadId,
+      lastStatus: resumed.recovered ? "Started a fresh Codex thread." : "Codex thread resumed.",
     });
     this.activeSessionId = updated.id;
-    this.activeCodexThreadId = updated.codexThreadId;
-    this.activeTurnId = null;
-    this.status = `Resumed session: ${updated.displayName}`;
+    this.showSessionChatsFlag = false;
+    this.status = resumed.recovered
+      ? `Recovered session chat: ${resumed.chat.displayName}`
+      : `Resumed session: ${updated.displayName}`;
     this.emitEvent("app", "sessionResumed", `Resumed session "${updated.displayName}".`, updated);
     this.emitState();
     return updated;
   }
 
-  async sendToCodex(text: string): Promise<CodexActionResult> {
+  async archiveSession(sessionId: string): Promise<VoiceSession> {
+    const updated = await this.store.archiveSession(sessionId);
+    if (this.activeSessionId === sessionId) {
+      this.activeSessionId = null;
+      this.showSessionChatsFlag = false;
+    }
+    this.status = `Archived session: ${updated.displayName}`;
+    this.emitEvent("app", "sessionArchived", this.status, updated);
+    this.emitState();
+    return updated;
+  }
+
+  async restoreSession(sessionId: string): Promise<VoiceSession> {
+    const updated = await this.store.restoreSession(sessionId);
+    this.status = `Restored session: ${updated.displayName}`;
+    this.emitEvent("app", "sessionRestored", this.status, updated);
+    this.emitState();
+    return updated;
+  }
+
+  async createChat(name: string, sessionId?: string): Promise<VoiceSession> {
+    const displayName = name.trim();
+    if (!displayName) throw new Error("Chat name is required.");
+    const session = await this.requireSession(sessionId);
+    const updated = await this.startChatThread(session, displayName);
+    this.activeSessionId = updated.id;
+    this.showSessionChatsFlag = true;
+    this.status = `Active chat: ${displayName}`;
+    this.emitEvent("app", "chatCreated", `Created chat "${displayName}".`, activeChatForSession(updated));
+    this.emitState();
+    return updated;
+  }
+
+  async switchChat(chatId: string, sessionId?: string): Promise<VoiceSession> {
+    const session = sessionId ? await this.requireSession(sessionId) : await this.requireSessionForChat(chatId);
+    const chat = session.chats.find((candidate) => candidate.id === chatId);
+    if (!chat) throw new Error(`Unknown chat: ${chatId}`);
+    if (!chat.codexThreadId) throw new Error(`Chat "${chat.displayName}" does not have a Codex thread id.`);
+
+    const resumed = await this.resumeChatThread(session, chat);
+
+    const updated = await this.store.setActiveChat(resumed.session.id, resumed.chat.id);
+    this.activeSessionId = updated.id;
+    this.showSessionChatsFlag = true;
+    this.status = resumed.recovered
+      ? `Recovered and switched to chat: ${resumed.chat.displayName}`
+      : `Active chat: ${resumed.chat.displayName}`;
+    this.emitEvent("app", "chatSwitched", `Switched to chat "${resumed.chat.displayName}".`, resumed.chat);
+    this.emitState();
+    return updated;
+  }
+
+  async archiveChat(chatId: string, sessionId?: string): Promise<VoiceSession> {
+    const session = sessionId ? await this.requireSession(sessionId) : await this.requireSessionForChat(chatId);
+    const chat = session.chats.find((candidate) => candidate.id === chatId && !candidate.archivedAt);
+    if (!chat) throw new Error(`Unknown chat: ${chatId}`);
+
+    const visibleChats = session.chats.filter((candidate) => !candidate.archivedAt);
+    const sessionWithReplacement =
+      visibleChats.length === 1 && visibleChats[0]?.id === chat.id
+        ? await this.startChatThread(session, "Main task")
+        : session;
+    const updated = await this.store.archiveChat(sessionWithReplacement.id, chat.id);
+    if (this.activeSessionId === session.id) {
+      this.activeSessionId = updated.id;
+      this.showSessionChatsFlag = Boolean(updated.activeChatId);
+    }
+    this.status = `Archived chat: ${chat.displayName}`;
+    this.emitEvent("app", "chatArchived", this.status, { sessionId: session.id, chatId: chat.id });
+    this.emitState();
+    return updated;
+  }
+
+  async restoreChat(chatId: string, sessionId?: string): Promise<VoiceSession> {
+    const session = sessionId
+      ? await this.store.getSession(sessionId, { includeArchived: true })
+      : await this.findSessionForChat(chatId, true);
+    if (!session) throw new Error(`Unknown chat: ${chatId}`);
+    const chat = session.chats.find((candidate) => candidate.id === chatId);
+    if (!chat) throw new Error(`Unknown chat: ${chatId}`);
+
+    const updated = await this.store.restoreChat(session.id, chat.id);
+    this.status = `Restored chat: ${chat.displayName}`;
+    this.emitEvent("app", "chatRestored", this.status, { sessionId: session.id, chatId: chat.id });
+    this.emitState();
+    return updated;
+  }
+
+  async listChats(sessionId?: string): Promise<VoiceChat[]> {
+    const session = await this.requireSession(sessionId);
+    return session.chats.filter((chat) => !chat.archivedAt);
+  }
+
+  async showSessionChats(open = true): Promise<void> {
+    this.showSessionChatsFlag = open;
+    this.status = open ? "Showing open chats." : "Hiding open chats.";
+    this.emitEvent("app", "showSessionChats", this.status, { open });
+    this.emitState();
+  }
+
+  async sendToCodex(text: string, chatId?: string): Promise<CodexActionResult> {
     const trimmed = text.trim();
     if (!trimmed) throw new Error("Cannot send an empty request to Codex.");
 
@@ -158,18 +271,19 @@ export class VoiceCodexOrchestrator extends EventEmitter {
       return this.handleNativeSlashCommand(trimmed);
     }
 
-    let session = this.activeSessionId ? await this.store.getSession(this.activeSessionId) : null;
-    if (!session) {
-      session = await this.createSession(titleFromText(trimmed));
-    } else if (!session.codexThreadId) {
-      session = await this.resumeSession(session.id);
+    let context: ChatContext;
+    if (!this.activeSessionId && !chatId) {
+      const session = await this.createSession(titleFromText(trimmed));
+      context = this.requireActiveChatContextFromSession(session);
+    } else {
+      context = await this.requireChatContext(chatId);
     }
-
-    if (!session.codexThreadId) throw new Error("Active session is missing a Codex thread id.");
+    const { session, chat } = await this.resumeChatThread(context.session, context.chat);
+    if (!chat.codexThreadId) throw new Error("Active chat is missing a Codex thread id.");
 
     const turnSettings = this.resolveTurnSettings(session);
     const result = (await this.codex.request("turn/start", {
-      threadId: session.codexThreadId,
+      threadId: chat.codexThreadId,
       cwd: session.folderPath,
       approvalPolicy: "on-request",
       personality: "friendly",
@@ -187,34 +301,37 @@ export class VoiceCodexOrchestrator extends EventEmitter {
     const turnId = result.turn?.id;
     if (!turnId) throw new Error("Codex did not return a turn id.");
 
-    this.activeTurnId = turnId;
-    this.activeTurnModel = turnSettings.model;
-    this.activeTurnReasoningEffort = turnSettings.reasoningEffort;
+    this.activeTurnByThread.set(chat.codexThreadId, turnId);
+    this.threadByTurn.set(turnId, chat.codexThreadId);
+    this.activeTurnModelByThread.set(chat.codexThreadId, turnSettings.model);
+    this.activeTurnReasoningEffortByThread.set(chat.codexThreadId, turnSettings.reasoningEffort);
     this.nextTurnModel = null;
     this.nextTurnReasoningEffort = null;
-    this.status = "Codex is working.";
-    const updated = await this.store.updateSession(session.id, {
+    this.status = `${chat.displayName}: Codex is working.`;
+    const updated = await this.store.updateChat(session.id, chat.id, {
       lastStatus: "Codex is working.",
     });
-    this.emitEvent("app", "turnStarted", "Sent voice request to Codex.", { turnId, text: trimmed });
+    this.emitEvent("app", "turnStarted", `Sent request to "${chat.displayName}".`, { turnId, chatId: chat.id, text: trimmed });
     this.emitState();
     return {
       kind: "turn",
       message: `Codex started with ${this.describeModelEffort(turnSettings.model, turnSettings.reasoningEffort)}.`,
       turnId,
       session: updated,
+      chat: updated.chats.find((candidate) => candidate.id === chat.id) ?? null,
     };
   }
 
-  async steerCodex(text: string): Promise<{ turnId: string }> {
-    const session = await this.requireActiveSession();
-    const threadId = session.codexThreadId;
-    if (!threadId || !this.activeTurnId) {
+  async steerCodex(text: string, chatId?: string): Promise<{ turnId: string }> {
+    const { session, chat } = await this.requireChatContext(chatId);
+    const threadId = chat.codexThreadId;
+    const turnId = threadId ? this.activeTurnByThread.get(threadId) ?? null : null;
+    if (!threadId || !turnId) {
       throw new Error("There is no active Codex turn to steer.");
     }
     await this.codex.request("turn/steer", {
       threadId,
-      expectedTurnId: this.activeTurnId,
+      expectedTurnId: turnId,
       input: [
         {
           type: "text",
@@ -223,40 +340,50 @@ export class VoiceCodexOrchestrator extends EventEmitter {
         },
       ],
     });
-    this.status = "Steered the active Codex turn.";
-    this.emitEvent("app", "turnSteered", "Steered the active Codex turn.", { text });
+    await this.store.updateChat(session.id, chat.id, { lastStatus: "Steered active turn." });
+    this.status = `Steered "${chat.displayName}".`;
+    this.emitEvent("app", "turnSteered", `Steered "${chat.displayName}".`, { text, chatId: chat.id });
     this.emitState();
-    return { turnId: this.activeTurnId };
+    return { turnId };
   }
 
-  async interruptCodex(): Promise<void> {
-    const session = await this.requireActiveSession();
-    if (!session.codexThreadId || !this.activeTurnId) {
+  async interruptCodex(chatId?: string): Promise<void> {
+    const { session, chat } = await this.requireChatContext(chatId);
+    const threadId = chat.codexThreadId;
+    const turnId = threadId ? this.activeTurnByThread.get(threadId) ?? null : null;
+    if (!threadId || !turnId) {
       throw new Error("There is no active Codex turn to interrupt.");
     }
     await this.codex.request("turn/interrupt", {
-      threadId: session.codexThreadId,
-      turnId: this.activeTurnId,
+      threadId,
+      turnId,
     });
-    this.status = "Requested Codex interruption.";
-    this.emitEvent("app", "turnInterrupted", "Requested Codex interruption.");
+    await this.store.updateChat(session.id, chat.id, { lastStatus: "Requested Codex interruption." });
+    this.status = `Requested interruption for "${chat.displayName}".`;
+    this.emitEvent("app", "turnInterrupted", this.status, { chatId: chat.id, turnId });
     this.emitState();
   }
 
-  async summarizeSession(sessionId?: string): Promise<string> {
+  async summarizeSession(sessionId?: string, chatId?: string): Promise<string> {
     const target =
       (sessionId ? await this.store.getSession(sessionId) : null) ??
       (this.activeSessionId ? await this.store.getSession(this.activeSessionId) : null) ??
       (await this.store.getMostRecent());
     if (!target) throw new Error("No recent sessions are available to summarize.");
 
-    const session = target.id === this.activeSessionId ? target : await this.resumeSession(target.id);
-    if (!session.codexThreadId) throw new Error("Session is missing a Codex thread id.");
+    const chat = chatId
+      ? target.chats.find((candidate) => candidate.id === chatId && !candidate.archivedAt) ?? null
+      : activeChatForSession(target) ?? target.chats.find((candidate) => !candidate.archivedAt) ?? null;
+    if (chatId && !chat) throw new Error(`Unknown chat for session "${target.displayName}": ${chatId}`);
+    if (!chat?.codexThreadId) throw new Error("Session is missing a Codex chat thread id.");
+    const resumed = await this.resumeChatThread(target, chat);
+    const resumedThreadId = resumed.chat.codexThreadId;
+    if (!resumedThreadId) throw new Error("Session is missing a Codex chat thread id.");
 
-    const turnSettings = this.resolveTurnSettings(session);
+    const turnSettings = this.resolveTurnSettings(resumed.session);
     const result = (await this.codex.request("turn/start", {
-      threadId: session.codexThreadId,
-      cwd: session.folderPath,
+      threadId: resumedThreadId,
+      cwd: resumed.session.folderPath,
       approvalPolicy: "on-request",
       personality: "friendly",
       ...(turnSettings.model ? { model: turnSettings.model } : {}),
@@ -273,19 +400,23 @@ export class VoiceCodexOrchestrator extends EventEmitter {
 
     const turnId = result.turn?.id;
     if (!turnId) throw new Error("Codex did not return a summary turn id.");
-    this.activeTurnId = turnId;
-    this.activeTurnModel = turnSettings.model;
-    this.activeTurnReasoningEffort = turnSettings.reasoningEffort;
+    this.activeTurnByThread.set(resumedThreadId, turnId);
+    this.threadByTurn.set(turnId, resumedThreadId);
+    this.activeTurnModelByThread.set(resumedThreadId, turnSettings.model);
+    this.activeTurnReasoningEffortByThread.set(resumedThreadId, turnSettings.reasoningEffort);
     this.nextTurnModel = null;
     this.nextTurnReasoningEffort = null;
-    this.status = "Codex is summarizing the session.";
-    this.emitEvent("app", "summaryStarted", `Summarizing "${session.displayName}".`, { turnId });
+    this.status = `Codex is summarizing "${resumed.chat.displayName}".`;
+    this.emitEvent("app", "summaryStarted", `Summarizing "${resumed.chat.displayName}".`, {
+      turnId,
+      chatId: resumed.chat.id,
+    });
     this.emitState();
 
     const summary = await this.waitForTurnText(turnId);
-    await this.store.updateSession(session.id, {
+    await this.store.updateChat(resumed.session.id, resumed.chat.id, {
       lastSummary: summary,
-      lastStatus: "Session summarized.",
+      lastStatus: "Chat summarized.",
     });
     this.emitEvent("app", "summaryCompleted", "Codex summarized the session.", { summary });
     this.emitState();
@@ -324,6 +455,12 @@ export class VoiceCodexOrchestrator extends EventEmitter {
     this.status = "Answered Codex question.";
     this.emitEvent("app", "questionAnswered", "Answered a Codex question.", { requestId, answers });
     this.emitState();
+  }
+
+  async getChatStatus(chatId?: string): Promise<CodexChatRuntime[]> {
+    const session = chatId ? await this.requireSessionForChat(chatId) : await this.requireSession();
+    const runtimes = this.chatRuntimeStates(session);
+    return chatId ? runtimes.filter((runtime) => runtime.chatId === chatId) : runtimes;
   }
 
   async setCodexSettings(
@@ -374,11 +511,119 @@ export class VoiceCodexOrchestrator extends EventEmitter {
     return this.activeSessionId ? this.store.getSession(this.activeSessionId) : null;
   }
 
-  private async requireActiveSession(): Promise<VoiceSession> {
-    if (!this.activeSessionId) throw new Error("No active Codex session.");
-    const session = await this.store.getSession(this.activeSessionId);
-    if (!session) throw new Error("Active session was not found.");
+  private async requireSession(sessionId?: string): Promise<VoiceSession> {
+    const id = sessionId ?? this.activeSessionId;
+    if (!id) throw new Error("No active Codex session.");
+    const session = await this.store.getSession(id);
+    if (!session) throw new Error(`Unknown voice session: ${id}`);
     return session;
+  }
+
+  private async requireSessionForChat(chatId: string): Promise<VoiceSession> {
+    const session = await this.findSessionForChat(chatId, false);
+    if (!session) throw new Error(`Unknown chat: ${chatId}`);
+    return session;
+  }
+
+  private async findSessionForChat(chatId: string, includeArchived: boolean): Promise<VoiceSession | null> {
+    const sessions = await this.store.listSessions({ includeArchived });
+    return (
+      sessions.find((candidate) =>
+        candidate.chats.some((chat) => chat.id === chatId && (includeArchived || !chat.archivedAt)),
+      ) ?? null
+    );
+  }
+
+  private async requireActiveSession(): Promise<VoiceSession> {
+    return this.requireSession();
+  }
+
+  private async requireChatContext(chatId?: string): Promise<ChatContext> {
+    if (chatId) {
+      const session = await this.requireSessionForChat(chatId);
+      const chat = session.chats.find((candidate) => candidate.id === chatId && !candidate.archivedAt);
+      if (!chat) throw new Error(`Unknown chat: ${chatId}`);
+      return { session, chat };
+    }
+
+    let session = await this.requireSession();
+    let chat = activeChatForSession(session);
+    if (!chat) {
+      session = await this.createChat("Main task", session.id);
+      chat = activeChatForSession(session);
+    }
+    if (!chat) throw new Error("Active session does not have an active chat.");
+    return { session, chat };
+  }
+
+  private requireActiveChatContextFromSession(session: VoiceSession): ChatContext {
+    const chat = activeChatForSession(session);
+    if (!chat) throw new Error("Session does not have an active chat.");
+    return { session, chat };
+  }
+
+  private async resumeChatThread(session: VoiceSession, chat: VoiceChat): Promise<ChatContext> {
+    if (!chat.codexThreadId) {
+      throw new Error(`Chat "${chat.displayName}" does not have a Codex thread id.`);
+    }
+
+    try {
+      await this.codex.request("thread/resume", {
+        threadId: chat.codexThreadId,
+        cwd: session.folderPath,
+        approvalPolicy: "on-request",
+        sandbox: "workspace-write",
+        personality: "friendly",
+        excludeTurns: true,
+        ...(session.model ? { model: session.model } : {}),
+      });
+      return { session, chat };
+    } catch (error) {
+      if (!isMissingCodexThreadError(error)) throw error;
+    }
+
+    const result = (await this.codex.request("thread/start", {
+      cwd: session.folderPath,
+      ...(session.model ? { model: session.model } : {}),
+      approvalPolicy: "on-request",
+      sandbox: "workspace-write",
+      personality: "friendly",
+      serviceName: "codex_voice",
+    })) as { thread?: { id?: string } };
+
+    const codexThreadId = result.thread?.id;
+    if (!codexThreadId) throw new Error("Codex did not return a replacement thread id.");
+
+    const updatedSession = await this.store.updateChat(session.id, chat.id, {
+      codexThreadId,
+      lastStatus: "Started a fresh Codex thread.",
+    });
+    const updatedChat = updatedSession.chats.find((candidate) => candidate.id === chat.id);
+    if (!updatedChat) throw new Error(`Unknown chat after recovery: ${chat.id}`);
+
+    this.emitEvent(
+      "app",
+      "chatThreadRecovered",
+      `Started a fresh Codex thread for "${updatedChat.displayName}" because the previous rollout was unavailable.`,
+      { chatId: updatedChat.id, oldThreadId: chat.codexThreadId, newThreadId: codexThreadId },
+    );
+    return { session: updatedSession, chat: updatedChat, recovered: true };
+  }
+
+  private async startChatThread(session: VoiceSession, displayName: string): Promise<VoiceSession> {
+    const result = (await this.codex.request("thread/start", {
+      cwd: session.folderPath,
+      ...(session.model ? { model: session.model } : {}),
+      approvalPolicy: "on-request",
+      sandbox: "workspace-write",
+      personality: "friendly",
+      serviceName: "codex_voice",
+    })) as { thread?: { id?: string } };
+
+    const codexThreadId = result.thread?.id;
+    if (!codexThreadId) throw new Error("Codex did not return a thread id.");
+
+    return this.store.addChat(session.id, displayName, codexThreadId);
   }
 
   private handleServerRequest(message: CodexJsonMessage): void {
@@ -393,17 +638,22 @@ export class VoiceCodexOrchestrator extends EventEmitter {
   private handleNotification(message: CodexJsonMessage): void {
     const method = message.method ?? "notification";
     const params = message.params as Record<string, unknown> | undefined;
+    const threadId = stringField(params?.threadId);
     const status = statusFromNotification(method, params);
     if (status) {
       this.status = status;
       this.emitEvent("codex", method, status, message.params);
+      if (threadId) this.updateChatForThread(threadId, { lastStatus: status });
     } else if (method !== "item/agentMessage/delta") {
       this.emitEvent("codex", method, method, message.params);
     }
 
     if (method === "turn/started") {
       const turn = (params?.turn ?? {}) as { id?: string };
-      if (turn.id) this.activeTurnId = turn.id;
+      if (threadId && turn.id) {
+        this.activeTurnByThread.set(threadId, turn.id);
+        this.threadByTurn.set(turn.id, threadId);
+      }
     }
 
     if (method === "thread/status/changed") {
@@ -430,12 +680,21 @@ export class VoiceCodexOrchestrator extends EventEmitter {
 
     if (method === "turn/completed") {
       const turn = (params?.turn ?? {}) as { id?: string; status?: string; error?: { message?: string } };
-      if (turn.id && turn.id === this.activeTurnId) {
-        this.activeTurnId = null;
-        this.activeTurnModel = null;
-        this.activeTurnReasoningEffort = null;
+      const completedThreadId = threadId ?? (turn.id ? this.threadByTurn.get(turn.id) : undefined);
+      if (completedThreadId) {
+        const activeTurnId = this.activeTurnByThread.get(completedThreadId);
+        const completedCurrentTurn = !turn.id || activeTurnId === turn.id;
+        if (completedCurrentTurn) {
+          this.activeTurnByThread.delete(completedThreadId);
+          this.activeTurnModelByThread.delete(completedThreadId);
+          this.activeTurnReasoningEffortByThread.delete(completedThreadId);
+          this.updateChatForThread(completedThreadId, {
+            lastStatus: turn.status === "failed" ? "Codex turn failed." : "Codex finished.",
+          });
+        }
       }
       if (turn.id) {
+        this.threadByTurn.delete(turn.id);
         const waiter = this.turnWaiters.get(turn.id);
         if (waiter) {
           clearTimeout(waiter.timeout);
@@ -462,17 +721,68 @@ export class VoiceCodexOrchestrator extends EventEmitter {
     });
   }
 
-  private runtimeState(): CodexRuntimeState {
-    const threadId = this.activeCodexThreadId;
+  private runtimeState(activeSession: VoiceSession | null): CodexRuntimeState {
+    const activeChat = activeSession ? activeChatForSession(activeSession) : null;
+    const activeThreadId = activeChat?.codexThreadId ?? null;
+    const chatRuntimes = activeSession ? this.chatRuntimeStates(activeSession) : [];
+    const activeRuntime = activeChat
+      ? chatRuntimes.find((runtime) => runtime.chatId === activeChat.id) ?? null
+      : null;
     return {
       ready: this.codex.ready,
       activeSessionId: this.activeSessionId,
-      activeTurnId: this.activeTurnId,
-      status: this.status,
-      threadStatus: threadId ? this.threadStatusByThread.get(threadId) ?? null : null,
-      tokenUsage: threadId ? this.tokenUsageByThread.get(threadId) ?? null : null,
-      pendingRequests: [...this.pendingRequests.values()],
+      activeChatId: activeChat?.id ?? null,
+      activeTurnId: activeRuntime?.activeTurnId ?? null,
+      status: activeRuntime?.status ?? this.status,
+      threadStatus: activeThreadId ? this.threadStatusByThread.get(activeThreadId) ?? null : null,
+      tokenUsage: activeThreadId ? this.tokenUsageByThread.get(activeThreadId) ?? null : null,
+      pendingRequests: this.runtimePendingRequests(activeSession, chatRuntimes),
+      chats: chatRuntimes,
+      showSessionChats: this.showSessionChatsFlag,
     };
+  }
+
+  private chatRuntimeStates(session: VoiceSession): CodexChatRuntime[] {
+    return session.chats.filter((chat) => !chat.archivedAt).map((chat) => {
+      const threadId = chat.codexThreadId;
+      const pendingRequests = threadId
+        ? [...this.pendingRequests.values()]
+            .filter((request) => request.threadId === threadId)
+            .map((request) => ({ ...request, sessionId: session.id, chatId: chat.id }))
+        : [];
+      const activeTurnId = threadId ? this.activeTurnByThread.get(threadId) ?? null : null;
+      return {
+        chatId: chat.id,
+        threadId,
+        displayName: chat.displayName,
+        activeTurnId,
+        status: pendingRequests[0]?.title ?? (activeTurnId ? "Codex is working." : chat.lastStatus ?? "Idle"),
+        threadStatus: threadId ? this.threadStatusByThread.get(threadId) ?? null : null,
+        tokenUsage: threadId ? this.tokenUsageByThread.get(threadId) ?? null : null,
+        pendingRequests,
+        activeTurnModel: threadId ? this.activeTurnModelByThread.get(threadId) ?? null : null,
+        activeTurnReasoningEffort: threadId
+          ? this.activeTurnReasoningEffortByThread.get(threadId) ?? null
+          : null,
+      };
+    });
+  }
+
+  private runtimePendingRequests(
+    activeSession: VoiceSession | null,
+    chatRuntimes: CodexChatRuntime[],
+  ): PendingCodexRequest[] {
+    const chatByThread = new Map(
+      chatRuntimes
+        .filter((runtime): runtime is CodexChatRuntime & { threadId: string } => Boolean(runtime.threadId))
+        .map((runtime) => [runtime.threadId, runtime]),
+    );
+    return [...this.pendingRequests.values()].map((request) => {
+      if (!request.threadId) return request;
+      const runtime = chatByThread.get(request.threadId);
+      if (!runtime) return request;
+      return { ...request, sessionId: activeSession?.id, chatId: runtime.chatId };
+    });
   }
 
   private async refreshModels(): Promise<void> {
@@ -504,13 +814,16 @@ export class VoiceCodexOrchestrator extends EventEmitter {
   }
 
   private codexSettings(activeSession: VoiceSession | null): CodexSettings {
+    const activeThreadId = activeSession ? activeChatForSession(activeSession)?.codexThreadId ?? null : null;
     return {
       sessionModel: activeSession?.model ?? null,
       sessionReasoningEffort: activeSession?.reasoningEffort ?? null,
       nextTurnModel: this.nextTurnModel,
       nextTurnReasoningEffort: this.nextTurnReasoningEffort,
-      activeTurnModel: this.activeTurnModel,
-      activeTurnReasoningEffort: this.activeTurnReasoningEffort,
+      activeTurnModel: activeThreadId ? this.activeTurnModelByThread.get(activeThreadId) ?? null : null,
+      activeTurnReasoningEffort: activeThreadId
+        ? this.activeTurnReasoningEffortByThread.get(activeThreadId) ?? null
+        : null,
       defaultModel: this.defaultModel,
       defaultReasoningEffort: this.defaultReasoningEffort,
       models: this.models,
@@ -623,40 +936,41 @@ export class VoiceCodexOrchestrator extends EventEmitter {
   }
 
   private async handleReviewSlash(args: string[]): Promise<CodexActionResult> {
-    const session = await this.requireActiveSession();
-    if (!session.codexThreadId) throw new Error("Active session is missing a Codex thread id.");
+    const { session, chat } = await this.requireChatContext();
+    if (!chat.codexThreadId) throw new Error("Active chat is missing a Codex thread id.");
     const { target, delivery } = parseReviewSlashArgs(args);
     const turnSettings = this.resolveTurnSettings(session);
     const result = (await this.codex.request("review/start", {
-      threadId: session.codexThreadId,
+      threadId: chat.codexThreadId,
       target,
       ...(delivery ? { delivery } : {}),
     })) as { turn?: { id?: string }; reviewThreadId?: string };
 
     const turnId = result.turn?.id ?? null;
     if (turnId) {
-      this.activeTurnId = turnId;
-      this.activeTurnModel = turnSettings.model;
-      this.activeTurnReasoningEffort = turnSettings.reasoningEffort;
+      this.activeTurnByThread.set(chat.codexThreadId, turnId);
+      this.threadByTurn.set(turnId, chat.codexThreadId);
+      this.activeTurnModelByThread.set(chat.codexThreadId, turnSettings.model);
+      this.activeTurnReasoningEffortByThread.set(chat.codexThreadId, turnSettings.reasoningEffort);
     }
-    const updated = await this.store.updateSession(session.id, {
+    const updated = await this.store.updateChat(session.id, chat.id, {
       lastStatus: "Codex review started.",
     });
     this.status = "Codex review started.";
     return this.commandResult(
-      `Started /review (${describeReviewTarget(target)}). Review thread: ${result.reviewThreadId ?? session.codexThreadId}.`,
+      `Started /review (${describeReviewTarget(target)}) in ${chat.displayName}. Review thread: ${result.reviewThreadId ?? chat.codexThreadId}.`,
       updated,
     );
   }
 
   private async handleCompactSlash(): Promise<CodexActionResult> {
-    const session = await this.requireActiveSession();
-    if (!session.codexThreadId) throw new Error("Active session is missing a Codex thread id.");
-    await this.codex.request("thread/compact/start", { threadId: session.codexThreadId });
-    const updated = await this.store.updateSession(session.id, {
+    const { session, chat } = await this.requireChatContext();
+    if (!chat.codexThreadId) throw new Error("Active chat is missing a Codex thread id.");
+    await this.codex.request("thread/compact/start", { threadId: chat.codexThreadId });
+    const updated = await this.store.updateChat(session.id, chat.id, {
       lastStatus: "Context compaction requested.",
     });
-    return this.commandResult("Requested native /compact for the active Codex thread.", updated);
+    return this.commandResult(`Requested native /compact for "${chat.displayName}".`, updated);
   }
 
   private async handleMcpSlash(args: string[]): Promise<CodexActionResult> {
@@ -670,9 +984,10 @@ export class VoiceCodexOrchestrator extends EventEmitter {
 
   private async handleAppsSlash(): Promise<CodexActionResult> {
     const session = await this.getActiveSession();
+    const chat = session ? activeChatForSession(session) : null;
     const result = (await this.codex.request("app/list", {
       limit: 100,
-      threadId: session?.codexThreadId ?? null,
+      threadId: chat?.codexThreadId ?? null,
       forceRefetch: false,
     })) as { data?: Array<{ id: string; name: string; isEnabled: boolean; isAccessible: boolean; pluginDisplayNames?: string[] }> };
     return this.commandResult(formatApps(result.data ?? []), session);
@@ -694,7 +1009,8 @@ export class VoiceCodexOrchestrator extends EventEmitter {
 
   private async nativeStatusText(): Promise<string> {
     const session = await this.getActiveSession();
-    const threadId = session?.codexThreadId ?? null;
+    const chat = session ? activeChatForSession(session) : null;
+    const threadId = chat?.codexThreadId ?? null;
     const settings = this.codexSettings(session);
     const resolved = session
       ? this.resolveTurnSettings(session)
@@ -710,10 +1026,11 @@ export class VoiceCodexOrchestrator extends EventEmitter {
 
     return [
       "Codex /status",
+      `Chat: ${chat?.displayName ?? "none"}`,
       `Thread: ${threadId ?? "none"}`,
       `Folder: ${session?.folderPath ?? "none"}`,
       `Runtime: ${this.threadStatusByThread.get(threadId ?? "") ?? this.status}`,
-      `Active turn: ${this.activeTurnId ?? "none"}`,
+      `Active turn: ${threadId ? this.activeTurnByThread.get(threadId) ?? "none" : "none"}`,
       `Effective next turn: model ${resolved.model ?? "default"}, reasoning ${resolved.reasoningEffort ?? "default"}`,
       `Session override: model ${settings.sessionModel ?? "default"}, reasoning ${settings.sessionReasoningEffort ?? "default"}`,
       `Active turn model: ${settings.activeTurnModel ?? "none"}, reasoning ${settings.activeTurnReasoningEffort ?? "none"}`,
@@ -756,7 +1073,7 @@ export class VoiceCodexOrchestrator extends EventEmitter {
     this.status = message.split("\n")[0] || "Native slash command handled.";
     this.emitEvent("app", "slashCommand", message);
     this.emitState();
-    return { kind: "command", message, turnId: null, session };
+    return { kind: "command", message, turnId: null, session, chat: session ? activeChatForSession(session) : null };
   }
 
   private currentSettingsText(activeSession: VoiceSession | null): string {
@@ -782,6 +1099,31 @@ export class VoiceCodexOrchestrator extends EventEmitter {
     return `model ${model ?? this.defaultModel ?? "default"}, reasoning ${
       effort ?? this.defaultReasoningEffort ?? "default"
     }`;
+  }
+
+  private updateChatForThread(threadId: string, patch: Partial<VoiceChat>): void {
+    void this.findChatByThread(threadId)
+      .then((context) => {
+        if (!context) return null;
+        return this.store.updateChat(context.session.id, context.chat.id, patch);
+      })
+      .then(() => this.emitState())
+      .catch((error) => {
+        this.emitEvent(
+          "app",
+          "chatUpdateFailed",
+          error instanceof Error ? error.message : "Unable to update chat status.",
+        );
+      });
+  }
+
+  private async findChatByThread(threadId: string): Promise<ChatContext | null> {
+    const sessions = await this.store.listSessions();
+    for (const session of sessions) {
+      const chat = session.chats.find((candidate) => candidate.codexThreadId === threadId && !candidate.archivedAt);
+      if (chat) return { session, chat };
+    }
+    return null;
   }
 
   private emitState(): void {
@@ -1026,6 +1368,16 @@ function statusFromNotification(method: string, params?: Record<string, unknown>
 
 function stringField(value: unknown): string | undefined {
   return typeof value === "string" && value.trim() ? value : undefined;
+}
+
+function activeChatForSession(session: VoiceSession): VoiceChat | null {
+  const chats = session.chats.filter((chat) => !chat.archivedAt);
+  return (
+    chats.find((chat) => chat.id === session.activeChatId) ??
+    chats.find((chat) => chat.codexThreadId === session.codexThreadId) ??
+    chats[0] ??
+    null
+  );
 }
 
 function titleFromText(text: string): string {
@@ -1321,11 +1673,17 @@ function settingsText(settings: CodexSettings): string {
   ].join("\n");
 }
 
+function isMissingCodexThreadError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return /no rollout found for thread id/i.test(message) || /unknown thread/i.test(message);
+}
+
 function codexTurnText(userText: string): string {
   return [
     "This request came through a local Realtime voice interface.",
     "Treat the current working directory as this voice session's workspace.",
     "Codex owns the actual planning, computer use, tool use, browser use, and execution.",
+    "For requests that may require controlling desktop apps, the model should use tool_search to discover computer-use before choosing an approach; do this only once per new tool or plugin requested by the user.",
     "Ask for clarification or approval when needed, and keep final status concise enough to relay by voice.",
     "",
     "User's spoken request:",

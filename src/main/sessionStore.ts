@@ -3,11 +3,15 @@ import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
 import { mkdir, readFile, readdir, writeFile } from "node:fs/promises";
 import path from "node:path";
-import type { VoiceSession } from "../shared/types";
+import type { ReasoningEffort, VoiceChat, VoiceSession } from "../shared/types";
 
 type SessionIndex = {
   version: 1;
   sessions: VoiceSession[];
+};
+
+type ListSessionsOptions = {
+  includeArchived?: boolean;
 };
 
 const INDEX_FILE = ".codex-voice-index.json";
@@ -30,13 +34,20 @@ export class SessionStore {
     }
   }
 
-  async listSessions(): Promise<VoiceSession[]> {
+  async listSessions(options: ListSessionsOptions = {}): Promise<VoiceSession[]> {
     const index = await this.readIndex();
-    return index.sessions.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+    return index.sessions
+      .filter((session) => options.includeArchived || !session.archivedAt)
+      .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
   }
 
-  async getSession(id: string): Promise<VoiceSession | null> {
-    const sessions = await this.listSessions();
+  async listArchivedSessions(): Promise<VoiceSession[]> {
+    const sessions = await this.listSessions({ includeArchived: true });
+    return sessions.filter((session) => session.archivedAt);
+  }
+
+  async getSession(id: string, options: ListSessionsOptions = {}): Promise<VoiceSession | null> {
+    const sessions = await this.listSessions(options);
     return sessions.find((session) => session.id === id) ?? null;
   }
 
@@ -58,11 +69,14 @@ export class SessionStore {
       id,
       displayName: displayName?.trim() || "Voice Session",
       folderPath,
+      activeChatId: null,
+      chats: [],
       codexThreadId: null,
       model: null,
       reasoningEffort: null,
       createdAt: now.toISOString(),
       updatedAt: now.toISOString(),
+      archivedAt: null,
       lastSummary: null,
       lastStatus: "Created session folder.",
     };
@@ -90,6 +104,157 @@ export class SessionStore {
       throw new Error(`Unknown voice session: ${id}`);
     }
     return this.upsertSession({ ...existing, ...patch });
+  }
+
+  async archiveSession(id: string): Promise<VoiceSession> {
+    const existing = await this.getSession(id, { includeArchived: true });
+    if (!existing) {
+      throw new Error(`Unknown voice session: ${id}`);
+    }
+    if (existing.archivedAt) return existing;
+    return this.upsertSession({
+      ...existing,
+      archivedAt: new Date().toISOString(),
+      lastStatus: "Archived session.",
+    });
+  }
+
+  async restoreSession(id: string): Promise<VoiceSession> {
+    const existing = await this.getSession(id, { includeArchived: true });
+    if (!existing) {
+      throw new Error(`Unknown voice session: ${id}`);
+    }
+    return this.upsertSession({
+      ...existing,
+      archivedAt: null,
+      lastStatus: "Restored session.",
+    });
+  }
+
+  async addChat(sessionId: string, displayName: string, codexThreadId: string): Promise<VoiceSession> {
+    const existing = await this.getSession(sessionId);
+    if (!existing) {
+      throw new Error(`Unknown voice session: ${sessionId}`);
+    }
+
+    const now = new Date().toISOString();
+    const chat: VoiceChat = {
+      id: randomUUID(),
+      displayName: displayName.trim() || "New chat",
+      codexThreadId,
+      model: null,
+      reasoningEffort: null,
+      createdAt: now,
+      updatedAt: now,
+      archivedAt: null,
+      lastSummary: null,
+      lastStatus: "Codex thread started.",
+    };
+
+    return this.upsertSession({
+      ...existing,
+      activeChatId: chat.id,
+      codexThreadId,
+      chats: [...existing.chats, chat],
+      lastStatus: `Active chat: ${chat.displayName}`,
+    });
+  }
+
+  async archiveChat(sessionId: string, chatId: string): Promise<VoiceSession> {
+    return this.setChatArchived(sessionId, chatId, new Date().toISOString());
+  }
+
+  async restoreChat(sessionId: string, chatId: string): Promise<VoiceSession> {
+    return this.setChatArchived(sessionId, chatId, null);
+  }
+
+  async setActiveChat(sessionId: string, chatId: string): Promise<VoiceSession> {
+    const existing = await this.getSession(sessionId);
+    if (!existing) {
+      throw new Error(`Unknown voice session: ${sessionId}`);
+    }
+    const chat = existing.chats.find((candidate) => candidate.id === chatId);
+    if (!chat) {
+      throw new Error(`Unknown chat: ${chatId}`);
+    }
+    return this.upsertSession({
+      ...existing,
+      activeChatId: chat.id,
+      codexThreadId: chat.codexThreadId,
+      lastStatus: `Active chat: ${chat.displayName}`,
+    });
+  }
+
+  async updateChat(sessionId: string, chatId: string, patch: Partial<VoiceChat>): Promise<VoiceSession> {
+    const existing = await this.getSession(sessionId);
+    if (!existing) {
+      throw new Error(`Unknown voice session: ${sessionId}`);
+    }
+    const now = new Date().toISOString();
+    let activeThreadId = existing.codexThreadId;
+    const chats = existing.chats.map((chat) => {
+      if (chat.id !== chatId) return chat;
+      const updated = { ...chat, ...patch, updatedAt: now };
+      if (existing.activeChatId === chatId) activeThreadId = updated.codexThreadId;
+      return updated;
+    });
+    if (!chats.some((chat) => chat.id === chatId)) {
+      throw new Error(`Unknown chat: ${chatId}`);
+    }
+    return this.upsertSession({
+      ...existing,
+      chats,
+      codexThreadId: activeThreadId,
+      lastStatus: patch.lastStatus ?? existing.lastStatus,
+      lastSummary: patch.lastSummary ?? existing.lastSummary,
+    });
+  }
+
+  private async setChatArchived(
+    sessionId: string,
+    chatId: string,
+    archivedAt: string | null,
+  ): Promise<VoiceSession> {
+    const existing = await this.getSession(sessionId, { includeArchived: true });
+    if (!existing) {
+      throw new Error(`Unknown voice session: ${sessionId}`);
+    }
+
+    const now = new Date().toISOString();
+    let changed = false;
+    const chats = existing.chats.map((chat) => {
+      if (chat.id !== chatId) return chat;
+      changed = true;
+      return {
+        ...chat,
+        archivedAt,
+        updatedAt: now,
+        lastStatus: archivedAt ? "Archived chat." : "Restored chat.",
+      };
+    });
+    if (!changed) {
+      throw new Error(`Unknown chat: ${chatId}`);
+    }
+
+    const currentActiveChat =
+      existing.activeChatId && chats.find((chat) => chat.id === existing.activeChatId && !chat.archivedAt)
+        ? existing.activeChatId
+        : null;
+    const restoredTarget = !archivedAt ? chats.find((chat) => chat.id === chatId) ?? null : null;
+    const activeChatId =
+      currentActiveChat ??
+      (restoredTarget && !restoredTarget.archivedAt ? restoredTarget.id : null) ??
+      chats.find((chat) => !chat.archivedAt)?.id ??
+      null;
+    const activeChat = activeChatId ? chats.find((chat) => chat.id === activeChatId) ?? null : null;
+
+    return this.upsertSession({
+      ...existing,
+      activeChatId,
+      codexThreadId: activeChat?.codexThreadId ?? null,
+      chats,
+      lastStatus: archivedAt ? "Archived chat." : "Restored chat.",
+    });
   }
 
   private async uniqueFolderPath(folderName: string): Promise<string> {
@@ -142,12 +307,77 @@ export class SessionStore {
 }
 
 function normalizeSession(value: unknown): VoiceSession {
-  const session = value as VoiceSession;
+  const session = value as VoiceSession & {
+    codexThreadId?: string | null;
+    activeChatId?: string | null;
+    chats?: VoiceChat[];
+  };
+  const createdAt = stringOrNow(session.createdAt);
+  const updatedAt = stringOrNow(session.updatedAt);
+  const legacyThreadId = stringOrNull(session.codexThreadId);
+  let chats = Array.isArray(session.chats)
+    ? session.chats.map((chat) => normalizeChat(chat, createdAt, updatedAt)).filter((chat) => chat.id)
+    : [];
+
+  if (chats.length === 0 && legacyThreadId) {
+    chats = [
+      {
+        id: `${session.id}-main`,
+        displayName: "Main task",
+        codexThreadId: legacyThreadId,
+        model: null,
+        reasoningEffort: null,
+        createdAt,
+        updatedAt,
+        archivedAt: null,
+        lastSummary: session.lastSummary ?? null,
+        lastStatus: session.lastStatus ?? "Codex thread started.",
+      },
+    ];
+  }
+
+  const unarchivedChats = chats.filter((chat) => !chat.archivedAt);
+  const activeChatId =
+    stringOrNull(session.activeChatId) && unarchivedChats.some((chat) => chat.id === session.activeChatId)
+      ? session.activeChatId
+      : unarchivedChats[0]?.id ?? null;
+  const activeChat = unarchivedChats.find((chat) => chat.id === activeChatId) ?? null;
+
   return {
     ...session,
+    createdAt,
+    updatedAt,
+    archivedAt: stringOrNull(session.archivedAt),
+    activeChatId,
+    chats,
+    codexThreadId: activeChat?.codexThreadId ?? null,
     model: session.model ?? null,
     reasoningEffort: session.reasoningEffort ?? null,
   };
+}
+
+function normalizeChat(value: unknown, fallbackCreatedAt: string, fallbackUpdatedAt: string): VoiceChat {
+  const chat = value as VoiceChat & { reasoningEffort?: ReasoningEffort | null };
+  return {
+    id: String(chat.id ?? randomUUID()),
+    displayName: String(chat.displayName ?? "Main task"),
+    codexThreadId: stringOrNull(chat.codexThreadId),
+    model: chat.model ?? null,
+    reasoningEffort: chat.reasoningEffort ?? null,
+    createdAt: stringOrNow(chat.createdAt, fallbackCreatedAt),
+    updatedAt: stringOrNow(chat.updatedAt, fallbackUpdatedAt),
+    archivedAt: stringOrNull(chat.archivedAt),
+    lastSummary: chat.lastSummary ?? null,
+    lastStatus: chat.lastStatus ?? null,
+  };
+}
+
+function stringOrNull(value: unknown): string | null {
+  return typeof value === "string" && value.trim() ? value : null;
+}
+
+function stringOrNow(value: unknown, fallback = new Date().toISOString()): string {
+  return typeof value === "string" && value.trim() ? value : fallback;
 }
 
 function sanitizeSessionName(name: string): string {

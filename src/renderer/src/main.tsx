@@ -7,6 +7,7 @@ import type {
   PendingCodexRequest,
   ReasoningEffort,
   ToolQuestionAnswer,
+  VoiceChat,
   VoiceSession,
 } from "../../shared/types";
 import { RealtimeVoiceClient } from "./realtimeClient";
@@ -15,15 +16,19 @@ import "./styles.css";
 const emptyState: AppState = {
   baseFolder: "",
   sessions: [],
+  archivedSessions: [],
   activeSession: null,
   runtime: {
     ready: false,
     activeSessionId: null,
+    activeChatId: null,
     activeTurnId: null,
     status: "Loading.",
     threadStatus: null,
     tokenUsage: null,
     pendingRequests: [],
+    chats: [],
+    showSessionChats: false,
   },
   codexSettings: {
     sessionModel: null,
@@ -46,10 +51,40 @@ const emptyState: AppState = {
   },
 };
 
+type AppWindowKind = "voice" | "debug";
+
+type ContextMenuTarget =
+  | {
+      kind: "session";
+      sessionId: string;
+      label: string;
+      x: number;
+      y: number;
+    }
+  | {
+      kind: "chat";
+      sessionId: string;
+      chatId: string;
+      label: string;
+      x: number;
+      y: number;
+    };
+
+type ArchivedChat = {
+  sessionId: string;
+  sessionName: string;
+  chat: VoiceChat;
+};
+
+function appWindowKind(): AppWindowKind {
+  const kind = new URLSearchParams(window.location.search).get("window");
+  return kind === "debug" ? "debug" : "voice";
+}
+
 function App(): React.ReactElement {
+  const [windowKind] = useState<AppWindowKind>(() => appWindowKind());
   const [state, setState] = useState<AppState>(emptyState);
   const [events, setEvents] = useState<AppEvent[]>([]);
-  const [view, setView] = useState<"home" | "debug">("home");
   const [sessionName, setSessionName] = useState("");
   const [message, setMessage] = useState("");
   const [steer, setSteer] = useState("");
@@ -60,7 +95,15 @@ function App(): React.ReactElement {
   const voiceRef = useRef<RealtimeVoiceClient | null>(null);
 
   useEffect(() => {
+    if (!error) return undefined;
+    const timeoutId = window.setTimeout(() => setError(null), 15000);
+    return () => window.clearTimeout(timeoutId);
+  }, [error]);
+
+  useEffect(() => {
+    document.title = windowKind === "debug" ? "Codex Voice Debug" : "Codex Voice";
     void refreshState();
+    void refreshEvents();
     const offState = window.codexVoice.onAppState(setState);
     const offEvent = window.codexVoice.onAppEvent((event) => {
       setEvents((current) => [event, ...current].slice(0, 250));
@@ -79,6 +122,19 @@ function App(): React.ReactElement {
 
   async function refreshState(): Promise<void> {
     setState(await window.codexVoice.getState());
+  }
+
+  async function refreshEvents(): Promise<void> {
+    setEvents(await window.codexVoice.getEvents());
+  }
+
+  async function clearEvents(): Promise<void> {
+    await window.codexVoice.clearEvents();
+    setEvents([]);
+  }
+
+  async function logEvent(event: AppEvent): Promise<void> {
+    await window.codexVoice.logEvent(event);
   }
 
   async function runAction(action: () => Promise<unknown>): Promise<void> {
@@ -109,7 +165,9 @@ function App(): React.ReactElement {
           setVoiceConnecting(!connected && label !== "Realtime data channel closed.");
           setVoiceStatus(label);
         },
-        onLog: (event) => setEvents((current) => [event, ...current].slice(0, 250)),
+        onLog: (event) => {
+          void window.codexVoice.logEvent(event);
+        },
       });
       voiceRef.current = client;
       try {
@@ -131,7 +189,11 @@ function App(): React.ReactElement {
     await toggleVoice();
   }
 
-  if (view === "debug") {
+  async function openDebugWindow(): Promise<void> {
+    await runAction(() => window.codexVoice.openDebugWindow());
+  }
+
+  if (windowKind === "debug") {
     return (
       <DebugDashboard
         state={state}
@@ -140,17 +202,14 @@ function App(): React.ReactElement {
         sessionName={sessionName}
         message={message}
         steer={steer}
-        voiceConnected={voiceConnected}
-        voiceConnecting={voiceConnecting}
-        voiceStatus={voiceStatus}
-        setEvents={setEvents}
         setSessionName={setSessionName}
         setMessage={setMessage}
         setSteer={setSteer}
+        onDismissError={() => setError(null)}
         onAction={runAction}
+        onClearEvents={clearEvents}
         onRefresh={refreshState}
-        onToggleVoice={toggleVoice}
-        onShowHome={() => setView("home")}
+        onLogEvent={logEvent}
       />
     );
   }
@@ -162,9 +221,10 @@ function App(): React.ReactElement {
       voiceConnected={voiceConnected}
       voiceConnecting={voiceConnecting}
       onAction={runAction}
+      onDismissError={() => setError(null)}
       onOrbAction={handleOrbAction}
       onRefresh={refreshState}
-      onShowDebug={() => setView("debug")}
+      onShowDebug={openDebugWindow}
       onToggleVoice={toggleVoice}
     />
   );
@@ -176,6 +236,7 @@ function VoiceHome({
   voiceConnected,
   voiceConnecting,
   onAction,
+  onDismissError,
   onOrbAction,
   onRefresh,
   onShowDebug,
@@ -186,21 +247,34 @@ function VoiceHome({
   voiceConnected: boolean;
   voiceConnecting: boolean;
   onAction: (action: () => Promise<unknown>) => Promise<void>;
+  onDismissError: () => void;
   onOrbAction: () => Promise<void>;
   onRefresh: () => Promise<void>;
-  onShowDebug: () => void;
+  onShowDebug: () => Promise<void>;
   onToggleVoice: () => Promise<void>;
 }): React.ReactElement {
   const [menuOpen, setMenuOpen] = useState(false);
   const [newOpen, setNewOpen] = useState(false);
+  const [newChatOpen, setNewChatOpen] = useState(false);
+  const [switchChatOpen, setSwitchChatOpen] = useState(false);
   const [browseOpen, setBrowseOpen] = useState(false);
+  const [archivedOpen, setArchivedOpen] = useState(false);
+  const [chatsOpen, setChatsOpen] = useState(false);
   const [modelOpen, setModelOpen] = useState(false);
   const [apiKeyOpen, setApiKeyOpen] = useState(false);
+  const [contextMenu, setContextMenu] = useState<ContextMenuTarget | null>(null);
   const [apiKey, setApiKey] = useState("");
   const [newName, setNewName] = useState("");
+  const [newChatName, setNewChatName] = useState("");
   const [query, setQuery] = useState("");
   const activeSession = state.activeSession;
   const featuredSession = activeSession ?? state.sessions[0] ?? null;
+  const sessionChats = useMemo(
+    () => chatSummariesForSession(activeSession, state),
+    [activeSession, state],
+  );
+  const archivedChats = useMemo(() => archivedChatsForSessions(state.sessions), [state.sessions]);
+  const archivedCount = state.archivedSessions.length + archivedChats.length;
   const recentSessions = state.sessions.slice(0, 3);
   const modelScope = activeSession ? "session" : "nextTurn";
   const effectiveModel =
@@ -226,6 +300,32 @@ function VoiceHome({
   });
   const voiceState = voiceStateLabel(state, voiceConnected, voiceConnecting);
 
+  useEffect(() => {
+    setChatsOpen(false);
+  }, [activeSession?.id]);
+
+  useEffect(() => {
+    setChatsOpen(state.runtime.showSessionChats);
+  }, [state.runtime.showSessionChats]);
+
+  useEffect(() => {
+    if (!contextMenu) return undefined;
+    const close = () => setContextMenu(null);
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") close();
+    };
+    window.addEventListener("click", close);
+    window.addEventListener("blur", close);
+    window.addEventListener("scroll", close, true);
+    window.addEventListener("keydown", closeOnEscape);
+    return () => {
+      window.removeEventListener("click", close);
+      window.removeEventListener("blur", close);
+      window.removeEventListener("scroll", close, true);
+      window.removeEventListener("keydown", closeOnEscape);
+    };
+  }, [contextMenu]);
+
   async function createNewSession(event: React.FormEvent<HTMLFormElement>): Promise<void> {
     event.preventDefault();
     await onAction(async () => {
@@ -238,6 +338,72 @@ function VoiceHome({
   async function resumeSession(sessionId: string): Promise<void> {
     await onAction(() => window.codexVoice.resumeSession(sessionId));
     setBrowseOpen(false);
+  }
+
+  async function createNewChat(event: React.FormEvent<HTMLFormElement>): Promise<void> {
+    event.preventDefault();
+    const name = newChatName.trim();
+    if (!name) return;
+    await onAction(async () => {
+      await window.codexVoice.createChat(name);
+      setNewChatName("");
+      setNewChatOpen(false);
+      setChatsOpen(true);
+    });
+  }
+
+  async function switchChat(chatId: string): Promise<void> {
+    await onAction(async () => {
+      await window.codexVoice.switchChat(chatId);
+      setSwitchChatOpen(false);
+      setChatsOpen(true);
+    });
+  }
+
+  function openSessionContextMenu(
+    event: React.MouseEvent<HTMLElement>,
+    session: VoiceSession,
+  ): void {
+    event.preventDefault();
+    setContextMenu({
+      kind: "session",
+      sessionId: session.id,
+      label: session.displayName,
+      x: event.clientX,
+      y: event.clientY,
+    });
+  }
+
+  function openChatContextMenu(event: React.MouseEvent<HTMLElement>, chat: ChatSummary): void {
+    if (!activeSession) return;
+    event.preventDefault();
+    setContextMenu({
+      kind: "chat",
+      sessionId: activeSession.id,
+      chatId: chat.id,
+      label: chat.title,
+      x: event.clientX,
+      y: event.clientY,
+    });
+  }
+
+  async function archiveContextTarget(): Promise<void> {
+    const target = contextMenu;
+    if (!target) return;
+    setContextMenu(null);
+    if (target.kind === "session") {
+      await onAction(() => window.codexVoice.archiveSession(target.sessionId));
+      return;
+    }
+    await onAction(() => window.codexVoice.archiveChat(target.chatId, target.sessionId));
+  }
+
+  async function restoreSession(sessionId: string): Promise<void> {
+    await onAction(() => window.codexVoice.restoreSession(sessionId));
+  }
+
+  async function restoreChat(sessionId: string, chatId: string): Promise<void> {
+    await onAction(() => window.codexVoice.restoreChat(chatId, sessionId));
   }
 
   async function saveApiKey(event: React.FormEvent<HTMLFormElement>): Promise<void> {
@@ -279,7 +445,7 @@ function VoiceHome({
                   role="menuitem"
                   onClick={() => {
                     setMenuOpen(false);
-                    onShowDebug();
+                    void onShowDebug();
                   }}
                 >
                   Debug UI
@@ -292,6 +458,15 @@ function VoiceHome({
                   }}
                 >
                   Refresh
+                </button>
+                <button
+                  role="menuitem"
+                  onClick={() => {
+                    setMenuOpen(false);
+                    setArchivedOpen(true);
+                  }}
+                >
+                  Archived{archivedCount > 0 ? ` (${archivedCount})` : ""}
                 </button>
                 <button
                   role="menuitem"
@@ -318,130 +493,152 @@ function VoiceHome({
           </div>
         </header>
 
-        <section className="voice-model-picker" aria-label="Model settings">
-          <button
-            className="voice-model-trigger"
-            aria-expanded={modelOpen}
-            onClick={() => setModelOpen((current) => !current)}
-          >
-            <span>{formatModelName(effectiveModel)}</span>
-            <span aria-hidden="true">·</span>
-            <span>{formatEffort(effectiveEffort)}</span>
-            <DownIcon />
-          </button>
-
-          {modelOpen && (
-            <div className="voice-model-panel">
-              <label className="voice-model-field">
-                Model
-                <span className="voice-model-select-wrap">
-                  <select
-                    value={effectiveModel}
-                    onChange={(event) =>
-                      void onAction(() =>
-                        window.codexVoice.setCodexSettings(
-                          { model: event.target.value || null },
-                          modelScope,
-                        ),
-                      )
-                    }
-                  >
-                    {state.codexSettings.models.length === 0 && (
-                      <option value={effectiveModel}>{formatModelName(effectiveModel)}</option>
-                    )}
-                    {state.codexSettings.models.map((model) => (
-                      <option key={model.id} value={model.model}>
-                        {model.displayName || formatModelName(model.model)}
-                      </option>
-                    ))}
-                  </select>
-                  <DownIcon />
-                </span>
-              </label>
-
-              <div className="voice-effort-list">
-                <span>Reasoning effort</span>
-                {(["low", "medium", "high", "xhigh"] as ReasoningEffort[]).map((effort) => (
-                  <button
-                    key={effort}
-                    className={effort === effectiveEffort ? "selected" : ""}
-                    onClick={() =>
-                      void onAction(() =>
-                        window.codexVoice.setCodexSettings({ reasoningEffort: effort }, modelScope),
-                      )
-                    }
-                  >
-                    {formatEffort(effort)}
-                    {effort === effectiveEffort && <CheckIcon />}
-                  </button>
-                ))}
-              </div>
-            </div>
-          )}
-        </section>
-
-        <section className="voice-hero" aria-label="Voice status">
-          <button
-            className={`voice-orb ${voiceState.tone}`}
-            aria-label={state.runtime.activeTurnId ? "Interrupt Codex" : "Start voice"}
-            onClick={() => void onOrbAction()}
-          >
-            <span className="voice-orb-shine" />
-          </button>
-          <div className="voice-state-line">
-            <WaveformIcon />
-            <span>{voiceState.label}</span>
-          </div>
-        </section>
-
-        {error && <div className="voice-error">{error}</div>}
-
-        <section className="voice-session-region" aria-label="Sessions">
-          <FeaturedSessionCard
-            activeSessionId={state.runtime.activeSessionId}
-            session={featuredSession}
-            onCreate={() => setNewOpen(true)}
-            onResume={resumeSession}
-          />
-
-          <div className="voice-actions">
-            <button className="voice-action-button" onClick={() => setNewOpen(true)}>
-              <PlusIcon />
-              <span>New session</span>
+        <div className="voice-home-scroll">
+          <section className="voice-model-picker" aria-label="Model settings">
+            <button
+              className="voice-model-trigger"
+              aria-expanded={modelOpen}
+              onClick={() => setModelOpen((current) => !current)}
+            >
+              <span>{formatModelName(effectiveModel)}</span>
+              <span aria-hidden="true">·</span>
+              <span>{formatEffort(effectiveEffort)}</span>
+              <DownIcon />
             </button>
-            <button className="voice-action-button" onClick={() => setBrowseOpen(true)}>
-              <FolderIcon />
-              <span>Browse sessions</span>
-            </button>
-          </div>
 
-          <div className="recent-block">
-            <h2>Recent Sessions</h2>
-            <div className="recent-list">
-              {recentSessions.map((session) => (
-                <button
-                  key={session.id}
-                  className="recent-row"
-                  onClick={() => void resumeSession(session.id)}
-                >
-                  <span>
-                    <strong>{session.displayName}</strong>
-                    <small>{formatSessionTime(session.updatedAt)}</small>
+            {modelOpen && (
+              <div className="voice-model-panel">
+                <label className="voice-model-field">
+                  Model
+                  <span className="voice-model-select-wrap">
+                    <select
+                      value={effectiveModel}
+                      onChange={(event) =>
+                        void onAction(() =>
+                          window.codexVoice.setCodexSettings(
+                            { model: event.target.value || null },
+                            modelScope,
+                          ),
+                        )
+                      }
+                    >
+                      {state.codexSettings.models.length === 0 && (
+                        <option value={effectiveModel}>{formatModelName(effectiveModel)}</option>
+                      )}
+                      {state.codexSettings.models.map((model) => (
+                        <option key={model.id} value={model.model}>
+                          {model.displayName || formatModelName(model.model)}
+                        </option>
+                      ))}
+                    </select>
+                    <DownIcon />
                   </span>
-                  <ChevronIcon />
-                </button>
-              ))}
-              {recentSessions.length === 0 && (
-                <div className="recent-empty">Recent sessions will appear here.</div>
-              )}
+                </label>
+
+                <div className="voice-effort-list">
+                  <span>Reasoning effort</span>
+                  {(["low", "medium", "high", "xhigh"] as ReasoningEffort[]).map((effort) => (
+                    <button
+                      key={effort}
+                      className={effort === effectiveEffort ? "selected" : ""}
+                      onClick={() =>
+                        void onAction(() =>
+                          window.codexVoice.setCodexSettings({ reasoningEffort: effort }, modelScope),
+                        )
+                      }
+                    >
+                      {formatEffort(effort)}
+                      {effort === effectiveEffort && <CheckIcon />}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
+          </section>
+
+          <section className="voice-hero" aria-label="Voice status">
+            <button
+              className={`voice-orb ${voiceState.tone}`}
+              aria-label={state.runtime.activeTurnId ? "Interrupt Codex" : "Start voice"}
+              onClick={() => void onOrbAction()}
+            >
+              <span className="voice-orb-shine" />
+            </button>
+            <div className="voice-state-line">
+              <WaveformIcon />
+              <span>{voiceState.label}</span>
             </div>
-          </div>
-        </section>
+          </section>
+
+          {error && <ErrorOverlay message={error} onDismiss={onDismissError} />}
+
+          <section className="voice-session-region" aria-label="Sessions">
+            <FeaturedSessionCard
+              activeSessionId={state.runtime.activeSessionId}
+              session={featuredSession}
+              chatsOpen={chatsOpen}
+              onCreate={() => setNewOpen(true)}
+              onResume={resumeSession}
+              onOpenMenu={openSessionContextMenu}
+              onToggleChats={() => {
+                const next = !chatsOpen;
+                setChatsOpen(next);
+                void onAction(() => window.codexVoice.showSessionChats(next));
+              }}
+            />
+
+            {chatsOpen && activeSession ? (
+              <SessionChatsPanel
+                chats={sessionChats}
+                onNewChat={() => setNewChatOpen(true)}
+                onSwitchChat={() => setSwitchChatOpen(true)}
+                onSelectChat={switchChat}
+                onOpenChatMenu={openChatContextMenu}
+              />
+            ) : (
+              <div className="voice-actions">
+                <button className="voice-action-button" onClick={() => setNewOpen(true)}>
+                  <PlusIcon />
+                  <span>New session</span>
+                </button>
+                <button className="voice-action-button" onClick={() => setBrowseOpen(true)}>
+                  <FolderIcon />
+                  <span>Browse sessions</span>
+                </button>
+              </div>
+            )}
+
+            {(!chatsOpen || !activeSession) && (
+              <div className="recent-block">
+                <h2>Recent Sessions</h2>
+                <div className="recent-list">
+                  {recentSessions.map((session) => (
+                    <button
+                      key={session.id}
+                      className="recent-row"
+                      onClick={() => void resumeSession(session.id)}
+                      onContextMenu={(event) => openSessionContextMenu(event, session)}
+                    >
+                      <span>
+                        <strong>{session.displayName}</strong>
+                        <small>{formatSessionTime(session.updatedAt)}</small>
+                      </span>
+                      <ChevronIcon />
+                    </button>
+                  ))}
+                  {recentSessions.length === 0 && (
+                    <div className="recent-empty">Recent sessions will appear here.</div>
+                  )}
+                </div>
+              </div>
+            )}
+          </section>
+        </div>
 
         <footer className="voice-footer">
           <span className={`voice-dot ${state.runtime.ready ? "ready" : ""}`} />
           <span>{state.runtime.ready ? "Codex app-server connected" : "Codex app-server starting"}</span>
-          <button className="voice-footer-gear" aria-label="Open debug UI" onClick={onShowDebug}>
+          <button className="voice-footer-gear" aria-label="Open debug UI" onClick={() => void onShowDebug()}>
             <GearIcon />
           </button>
         </footer>
@@ -501,6 +698,7 @@ function VoiceHome({
                   key={session.id}
                   className="browse-row"
                   onClick={() => void resumeSession(session.id)}
+                  onContextMenu={(event) => openSessionContextMenu(event, session)}
                 >
                   <FolderIcon />
                   <span>
@@ -511,6 +709,68 @@ function VoiceHome({
                 </button>
               ))}
               {filteredSessions.length === 0 && <p className="browse-empty">No matching sessions.</p>}
+            </div>
+          </section>
+        </div>
+      )}
+
+      {newChatOpen && (
+        <div className="voice-modal-backdrop" role="presentation">
+          <form className="voice-dialog" onSubmit={(event) => void createNewChat(event)}>
+            <div className="voice-dialog-header">
+              <h2>New chat</h2>
+              <button type="button" aria-label="Close" onClick={() => setNewChatOpen(false)}>
+                <CloseIcon />
+              </button>
+            </div>
+            <label className="voice-field">
+              Chat name
+              <input
+                autoFocus
+                value={newChatName}
+                onChange={(event) => setNewChatName(event.target.value)}
+                placeholder="Research thread"
+              />
+            </label>
+            <div className="voice-dialog-actions">
+              <button type="button" onClick={() => setNewChatOpen(false)}>
+                Cancel
+              </button>
+              <button type="submit" className="voice-primary" disabled={!newChatName.trim()}>
+                Create
+              </button>
+            </div>
+          </form>
+        </div>
+      )}
+
+      {switchChatOpen && (
+        <div className="voice-modal-backdrop" role="presentation">
+          <section className="voice-dialog browse-dialog" aria-label="Switch chat">
+            <div className="voice-dialog-header">
+              <h2>Switch chat</h2>
+              <button type="button" aria-label="Close" onClick={() => setSwitchChatOpen(false)}>
+                <CloseIcon />
+              </button>
+            </div>
+            <div className="browse-list">
+              {sessionChats.map((chat) => (
+                <button
+                  key={chat.id}
+                  className={`browse-row ${chat.active ? "selected-chat" : ""}`}
+                  onClick={() => void switchChat(chat.id)}
+                >
+                  <span className={`chat-status-dot ${chat.tone}`} />
+                  <span>
+                    <strong>{chat.title}</strong>
+                    <small>{chat.detail}</small>
+                  </span>
+                  <span className="browse-row-trailing">
+                    {chat.active && <span className="active-chat-pill">Active</span>}
+                    <ChevronIcon />
+                  </span>
+                </button>
+              ))}
             </div>
           </section>
         </div>
@@ -562,20 +822,43 @@ function VoiceHome({
           </form>
         </div>
       )}
+
+      {archivedOpen && (
+        <ArchivedDialog
+          sessions={state.archivedSessions}
+          chats={archivedChats}
+          onClose={() => setArchivedOpen(false)}
+          onRestoreSession={restoreSession}
+          onRestoreChat={restoreChat}
+        />
+      )}
+
+      {contextMenu && (
+        <ArchiveContextMenu
+          target={contextMenu}
+          onArchive={() => void archiveContextTarget()}
+        />
+      )}
     </main>
   );
 }
 
 function FeaturedSessionCard({
   activeSessionId,
+  chatsOpen,
   session,
   onCreate,
   onResume,
+  onOpenMenu,
+  onToggleChats,
 }: {
   activeSessionId: string | null;
+  chatsOpen: boolean;
   session: VoiceSession | null;
   onCreate: () => void;
   onResume: (sessionId: string) => Promise<void>;
+  onOpenMenu: (event: React.MouseEvent<HTMLElement>, session: VoiceSession) => void;
+  onToggleChats: () => void;
 }): React.ReactElement {
   if (!session) {
     return (
@@ -594,7 +877,18 @@ function FeaturedSessionCard({
 
   const active = session.id === activeSessionId;
   return (
-    <button className="featured-session-card" onClick={() => void onResume(session.id)}>
+    <button
+      className={`featured-session-card ${chatsOpen && active ? "expanded" : ""}`}
+      aria-expanded={active ? chatsOpen : undefined}
+      onContextMenu={(event) => onOpenMenu(event, session)}
+      onClick={() => {
+        if (active) {
+          onToggleChats();
+          return;
+        }
+        void onResume(session.id);
+      }}
+    >
       <span className="voice-folder-tile">
         <FolderIcon />
       </span>
@@ -610,8 +904,196 @@ function FeaturedSessionCard({
           )}
         </small>
       </span>
-      <ChevronIcon />
+      <ChevronIcon className={chatsOpen && active ? "chevron-open" : ""} />
     </button>
+  );
+}
+
+type ChatSummary = {
+  id: string;
+  title: string;
+  detail: string;
+  tone: "active" | "waiting" | "idle";
+  active: boolean;
+};
+
+function SessionChatsPanel({
+  chats,
+  onNewChat,
+  onSwitchChat,
+  onSelectChat,
+  onOpenChatMenu,
+}: {
+  chats: ChatSummary[];
+  onNewChat: () => void;
+  onSwitchChat: () => void;
+  onSelectChat: (chatId: string) => Promise<void>;
+  onOpenChatMenu: (event: React.MouseEvent<HTMLElement>, chat: ChatSummary) => void;
+}): React.ReactElement {
+  const activeChat = chats.find((chat) => chat.active) ?? null;
+  return (
+    <div className="session-chats-panel">
+      <div className="session-chats-header">
+        <div>
+          <h2>Chats in this session</h2>
+          {activeChat && (
+            <p>
+              Active chat: <strong>{activeChat.title}</strong>
+            </p>
+          )}
+        </div>
+        <span>{chats.length}</span>
+      </div>
+      <div className="session-chat-list">
+        {chats.map((chat) => (
+          <button
+            key={chat.id}
+            className={`session-chat-row ${chat.active ? "active" : ""}`}
+            onClick={() => void onSelectChat(chat.id)}
+            onContextMenu={(event) => onOpenChatMenu(event, chat)}
+          >
+            <span className={`chat-status-dot ${chat.tone}`} />
+            <span className="session-chat-copy">
+              <strong>{chat.title}</strong>
+              <small>{chat.detail}</small>
+            </span>
+            {chat.active && (
+              <span className="session-chat-trailing">
+                <span className="active-chat-pill">Active</span>
+              </span>
+            )}
+          </button>
+        ))}
+      </div>
+      <div className="voice-actions chat-actions">
+        <button className="voice-action-button" type="button" onClick={onNewChat}>
+          <PlusIcon />
+          <span>New chat</span>
+        </button>
+        <button className="voice-action-button" type="button" onClick={onSwitchChat}>
+          <SwitchIcon />
+          <span>Switch chat</span>
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function ArchiveContextMenu({
+  target,
+  onArchive,
+}: {
+  target: ContextMenuTarget;
+  onArchive: () => void;
+}): React.ReactElement {
+  const left = Math.max(8, Math.min(target.x, window.innerWidth - 188));
+  const top = Math.max(8, Math.min(target.y, window.innerHeight - 54));
+  return (
+    <div
+      className="voice-context-menu"
+      role="menu"
+      style={{ left, top }}
+      onClick={(event) => event.stopPropagation()}
+    >
+      <button role="menuitem" onClick={onArchive}>
+        {target.kind === "session" ? "Archive session" : "Archive chat"}
+      </button>
+    </div>
+  );
+}
+
+function ArchivedDialog({
+  sessions,
+  chats,
+  onClose,
+  onRestoreSession,
+  onRestoreChat,
+}: {
+  sessions: VoiceSession[];
+  chats: ArchivedChat[];
+  onClose: () => void;
+  onRestoreSession: (sessionId: string) => Promise<void>;
+  onRestoreChat: (sessionId: string, chatId: string) => Promise<void>;
+}): React.ReactElement {
+  const empty = sessions.length === 0 && chats.length === 0;
+  return (
+    <div className="voice-modal-backdrop" role="presentation">
+      <section className="voice-dialog archived-dialog" aria-label="Archived">
+        <div className="voice-dialog-header">
+          <h2>Archived</h2>
+          <button type="button" aria-label="Close" onClick={onClose}>
+            <CloseIcon />
+          </button>
+        </div>
+
+        {empty ? (
+          <p className="browse-empty">Archived chats and sessions will appear here.</p>
+        ) : (
+          <div className="archived-sections">
+            {sessions.length > 0 && (
+              <section className="archived-section">
+                <h3>Sessions</h3>
+                <div className="archived-list">
+                  {sessions.map((session) => (
+                    <article key={session.id} className="archived-row">
+                      <FolderIcon />
+                      <span>
+                        <strong>{session.displayName}</strong>
+                        <small>{session.archivedAt ? formatSessionTime(session.archivedAt) : "Archived"}</small>
+                      </span>
+                      <button type="button" onClick={() => void onRestoreSession(session.id)}>
+                        Restore
+                      </button>
+                    </article>
+                  ))}
+                </div>
+              </section>
+            )}
+
+            {chats.length > 0 && (
+              <section className="archived-section">
+                <h3>Chats</h3>
+                <div className="archived-list">
+                  {chats.map(({ sessionId, sessionName, chat }) => (
+                    <article key={chat.id} className="archived-row">
+                      <span className="chat-status-dot idle" />
+                      <span>
+                        <strong>{chat.displayName}</strong>
+                        <small>
+                          {sessionName}
+                          <span className="voice-meta-dot">.</span>
+                          {chat.archivedAt ? formatSessionTime(chat.archivedAt) : "Archived"}
+                        </small>
+                      </span>
+                      <button type="button" onClick={() => void onRestoreChat(sessionId, chat.id)}>
+                        Restore
+                      </button>
+                    </article>
+                  ))}
+                </div>
+              </section>
+            )}
+          </div>
+        )}
+      </section>
+    </div>
+  );
+}
+
+function ErrorOverlay({
+  message,
+  onDismiss,
+}: {
+  message: string;
+  onDismiss: () => void;
+}): React.ReactElement {
+  return (
+    <div className="error-overlay" role="alert" aria-live="assertive">
+      <p>{message}</p>
+      <button type="button" aria-label="Dismiss error" onClick={onDismiss}>
+        <CloseIcon />
+      </button>
+    </div>
   );
 }
 
@@ -622,17 +1104,14 @@ function DebugDashboard({
   sessionName,
   message,
   steer,
-  voiceConnected,
-  voiceConnecting,
-  voiceStatus,
-  setEvents,
   setSessionName,
   setMessage,
   setSteer,
+  onDismissError,
   onAction,
+  onClearEvents,
   onRefresh,
-  onToggleVoice,
-  onShowHome,
+  onLogEvent,
 }: {
   state: AppState;
   events: AppEvent[];
@@ -640,19 +1119,19 @@ function DebugDashboard({
   sessionName: string;
   message: string;
   steer: string;
-  voiceConnected: boolean;
-  voiceConnecting: boolean;
-  voiceStatus: string;
-  setEvents: React.Dispatch<React.SetStateAction<AppEvent[]>>;
   setSessionName: React.Dispatch<React.SetStateAction<string>>;
   setMessage: React.Dispatch<React.SetStateAction<string>>;
   setSteer: React.Dispatch<React.SetStateAction<string>>;
+  onDismissError: () => void;
   onAction: (action: () => Promise<unknown>) => Promise<void>;
+  onClearEvents: () => Promise<void>;
   onRefresh: () => Promise<void>;
-  onToggleVoice: () => Promise<void>;
-  onShowHome: () => void;
+  onLogEvent: (event: AppEvent) => Promise<void>;
 }): React.ReactElement {
   const activeFolder = state.activeSession?.folderPath ?? "No active session.";
+  const activeChatName =
+    (state.activeSession?.chats ?? []).find((chat) => chat.id === state.runtime.activeChatId && !chat.archivedAt)
+      ?.displayName ?? "none";
   const effectiveNextModel =
     state.codexSettings.nextTurnModel ??
     state.codexSettings.sessionModel ??
@@ -672,14 +1151,13 @@ function DebugDashboard({
           <p>Voice is the front door. Codex owns the computer work.</p>
         </div>
         <div className="status-stack">
-          <button onClick={onShowHome}>Voice Home</button>
           <StatusPill label={state.runtime.ready ? "Codex ready" : "Codex starting"} tone={state.runtime.ready ? "good" : "warn"} />
           <StatusPill label={`Next: ${effectiveNextModel} / ${effectiveNextEffort}`} tone="muted" />
-          <StatusPill label={voiceConnected ? "Voice live" : "Voice off"} tone={voiceConnected ? "good" : "muted"} />
+          <StatusPill label="Voice in main window" tone="muted" />
         </div>
       </header>
 
-      {error && <div className="error-banner">{error}</div>}
+      {error && <ErrorOverlay message={error} onDismiss={onDismissError} />}
 
       <section className="workspace-bar">
         <div>
@@ -734,18 +1212,11 @@ function DebugDashboard({
 
         <section className="panel command-panel">
           <div className="panel-header">
-            <h2>Voice / Codex Control</h2>
-            <button
-              className={voiceConnected ? "danger" : "primary"}
-              disabled={!state.realtime.available && !voiceConnected}
-              onClick={() => void onToggleVoice()}
-            >
-              {voiceConnected ? "Disconnect Voice" : "Connect Voice"}
-            </button>
+            <h2>Codex Control</h2>
           </div>
           <p className="help">
             {state.realtime.available
-              ? `${voiceStatus} Model: ${state.realtime.model}, voice: ${state.realtime.voice}.`
+              ? `Realtime voice is controlled from the main Codex Voice window. Model: ${state.realtime.model}, voice: ${state.realtime.voice}.`
               : state.realtime.reason}
           </p>
 
@@ -753,7 +1224,7 @@ function DebugDashboard({
             <span className="label">Codex status</span>
             <strong>{state.runtime.status}</strong>
             <small>
-              Thread: {state.activeSession?.codexThreadId ?? "none"} | Turn:{" "}
+              Chat: {activeChatName} | Thread: {state.activeSession?.codexThreadId ?? "none"} | Turn:{" "}
               {state.runtime.activeTurnId ?? "none"}
             </small>
             <small>
@@ -789,15 +1260,12 @@ function DebugDashboard({
               onClick={() =>
                 void onAction(async () => {
                   const summary = await window.codexVoice.summarizeSession(state.activeSession?.id);
-                  setEvents((current) => [
-                    {
-                      at: new Date().toISOString(),
-                      source: "app",
-                      kind: "summary",
-                      message: summary,
-                    },
-                    ...current,
-                  ]);
+                  await onLogEvent({
+                    at: new Date().toISOString(),
+                    source: "app",
+                    kind: "summary",
+                    message: summary,
+                  });
                 })
               }
             >
@@ -848,7 +1316,7 @@ function DebugDashboard({
         <section className="panel event-panel">
           <div className="panel-header">
             <h2>Event Log</h2>
-            <button onClick={() => setEvents([])}>Clear</button>
+            <button onClick={() => void onClearEvents()}>Clear</button>
           </div>
           <div className="event-list">
             {events.map((event, index) => (
@@ -878,6 +1346,34 @@ function voiceStateLabel(
   if (voiceConnecting) return { label: "Connecting", tone: "connecting" };
   if (voiceConnected) return { label: "Listening", tone: "listening" };
   return { label: "Voice off", tone: "off" };
+}
+
+function chatSummariesForSession(session: VoiceSession | null, state: AppState): ChatSummary[] {
+  if (!session) return [];
+  return (session.chats ?? []).filter((chat) => !chat.archivedAt).map((chat) => {
+    const runtime = (state.runtime.chats ?? []).find((candidate) => candidate.chatId === chat.id);
+    const waiting = Boolean(runtime?.pendingRequests.length);
+    const working = Boolean(runtime?.activeTurnId);
+    return {
+      id: chat.id,
+      title: chat.displayName,
+      detail: runtime?.status ?? chat.lastStatus ?? "Idle",
+      tone: waiting ? "waiting" : working ? "active" : "idle",
+      active: chat.id === state.runtime.activeChatId,
+    };
+  });
+}
+
+function archivedChatsForSessions(sessions: VoiceSession[]): ArchivedChat[] {
+  return sessions.flatMap((session) =>
+    (session.chats ?? [])
+      .filter((chat) => chat.archivedAt)
+      .map((chat) => ({
+        sessionId: session.id,
+        sessionName: session.displayName,
+        chat,
+      })),
+  );
 }
 
 function formatSessionTime(iso: string): string {
@@ -924,7 +1420,7 @@ function PlusIcon(): React.ReactElement {
 
 function DownIcon(): React.ReactElement {
   return (
-    <svg viewBox="0 0 24 24" aria-hidden="true">
+    <svg viewBox="0 0 24 24" aria-hidden="true" className="voice-chevron">
       <path d="m6.5 9 5.5 5.5L17.5 9" />
     </svg>
   );
@@ -938,10 +1434,22 @@ function CheckIcon(): React.ReactElement {
   );
 }
 
-function ChevronIcon(): React.ReactElement {
+function ChevronIcon({ className }: { className?: string } = {}): React.ReactElement {
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      aria-hidden="true"
+      className={["voice-chevron", className].filter(Boolean).join(" ")}
+    >
+      <path d="m9 5.5 6.5 6.5L9 18.5" />
+    </svg>
+  );
+}
+
+function SwitchIcon(): React.ReactElement {
   return (
     <svg viewBox="0 0 24 24" aria-hidden="true">
-      <path d="m9 5.5 6.5 6.5L9 18.5" />
+      <path d="M7 7h10l-3-3M17 17H7l3 3M17 7l-4 4M7 17l4-4" />
     </svg>
   );
 }

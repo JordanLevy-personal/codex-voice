@@ -1,4 +1,4 @@
-import type { AppEvent, ApprovalDecision, PendingCodexRequest, ToolQuestionAnswer } from "../../shared/types";
+import type { AppEvent, ApprovalDecision, AppState, PendingCodexRequest, ToolQuestionAnswer, VoiceChat } from "../../shared/types";
 
 type RealtimeCallbacks = {
   onLog: (event: AppEvent) => void;
@@ -214,24 +214,30 @@ async function callVoiceTool(name: string, args: Record<string, unknown>): Promi
   if (name === "submit_to_codex") {
     const request = stringArg(args.request);
     const context = optionalString(args.context);
+    const chatId = await resolveChatId(optionalString(args.chatId), optionalString(args.chatName));
     const result = await window.codexVoice.sendToCodex(
       context ? `${request}\n\nVoice conversation context:\n${context}` : request,
+      chatId,
     );
     return {
       ok: true,
       message: result.message,
       turnId: result.turnId,
       session: result.session,
+      chat: result.chat,
     };
   }
 
   if (name === "steer_codex") {
-    const result = await window.codexVoice.steerCodex(stringArg(args.message));
+    const result = await window.codexVoice.steerCodex(
+      stringArg(args.message),
+      await resolveChatId(optionalString(args.chatId), optionalString(args.chatName)),
+    );
     return { ok: true, message: "Codex received the update.", ...result };
   }
 
   if (name === "interrupt_codex") {
-    await window.codexVoice.interruptCodex();
+    await window.codexVoice.interruptCodex(await resolveChatId(optionalString(args.chatId), optionalString(args.chatName)));
     return { ok: true, message: "Codex interruption was requested." };
   }
 
@@ -240,6 +246,7 @@ async function callVoiceTool(name: string, args: Record<string, unknown>): Promi
     return {
       ok: true,
       activeSession: state.activeSession,
+      activeChat: state.activeSession ? activeChat(visibleChats(state.activeSession.chats), state.activeSession.activeChatId) : null,
       runtime: state.runtime,
       codexSettings: state.codexSettings,
     };
@@ -302,6 +309,40 @@ async function callVoiceTool(name: string, args: Record<string, unknown>): Promi
     return { ok: true, session };
   }
 
+  if (name === "create_new_codex_chat") {
+    const session = await window.codexVoice.createChat(stringArg(args.name));
+    return { ok: true, message: `Created chat ${stringArg(args.name)}.`, session, activeChat: activeChat(visibleChats(session.chats), session.activeChatId) };
+  }
+
+  if (name === "list_codex_chats") {
+    const state = await window.codexVoice.getState();
+    return {
+      ok: true,
+      activeChatId: state.runtime.activeChatId,
+      chats: visibleChats(state.activeSession?.chats ?? []),
+      statuses: state.runtime.chats,
+    };
+  }
+
+  if (name === "switch_codex_chat") {
+    const chatId = await resolveChatId(optionalString(args.chatId), optionalString(args.name));
+    if (!chatId) throw new Error("No chat matched that request.");
+    const session = await window.codexVoice.switchChat(chatId);
+    return { ok: true, message: "Switched active chat.", session, activeChat: activeChat(visibleChats(session.chats), session.activeChatId) };
+  }
+
+  if (name === "get_codex_chat_status") {
+    const chatId = await resolveChatId(optionalString(args.chatId), optionalString(args.name), true);
+    const statuses = await window.codexVoice.getChatStatus(chatId);
+    return { ok: true, statuses };
+  }
+
+  if (name === "show_open_codex_chats") {
+    await window.codexVoice.showSessionChats(true);
+    const state = await window.codexVoice.getState();
+    return { ok: true, message: "Showing open chats.", chats: visibleChats(state.activeSession?.chats ?? []), statuses: state.runtime.chats };
+  }
+
   if (name === "list_recent_codex_sessions") {
     const state = await window.codexVoice.getState();
     return {
@@ -312,6 +353,8 @@ async function callVoiceTool(name: string, args: Record<string, unknown>): Promi
         updatedAt: session.updatedAt,
         folderPath: session.folderPath,
         lastSummary: session.lastSummary,
+        activeChatId: session.activeChatId,
+        chats: visibleChats(session.chats),
       })),
     };
   }
@@ -325,7 +368,7 @@ async function callVoiceTool(name: string, args: Record<string, unknown>): Promi
   }
 
   if (name === "summarize_recent_session") {
-    const summary = await window.codexVoice.summarizeSession(optionalString(args.sessionId));
+    const summary = await window.codexVoice.summarizeSession(optionalString(args.sessionId), await resolveChatId(optionalString(args.chatId), optionalString(args.chatName), true));
     return { ok: true, summary };
   }
 
@@ -350,6 +393,40 @@ function stringArg(value: unknown): string {
 
 function optionalString(value: unknown): string | undefined {
   return typeof value === "string" && value.trim() ? value.trim() : undefined;
+}
+
+async function resolveChatId(
+  chatId: string | undefined,
+  name?: string,
+  allowAll = false,
+): Promise<string | undefined> {
+  if (chatId) return chatId;
+  if (!name) return allowAll ? undefined : undefined;
+  const state = await window.codexVoice.getState();
+  const chat = findChatByName(state, name);
+  if (!chat) throw new Error(`No chat matched "${name}".`);
+  return chat.id;
+}
+
+function findChatByName(state: AppState, name: string): VoiceChat | null {
+  const needle = name.trim().toLowerCase();
+  const chats = visibleChats(state.activeSession?.chats ?? []);
+  const exact = chats.filter((chat) => chat.displayName.toLowerCase() === needle || chat.id === name);
+  if (exact.length === 1) return exact[0];
+  if (exact.length > 1) throw new Error(`More than one chat matched "${name}".`);
+  const partial = chats.filter((chat) => chat.displayName.toLowerCase().includes(needle));
+  if (partial.length === 1) return partial[0];
+  if (partial.length > 1) throw new Error(`More than one chat matched "${name}".`);
+  return null;
+}
+
+function activeChat(chats: VoiceChat[], activeChatId: string | null): VoiceChat | null {
+  const visible = visibleChats(chats);
+  return visible.find((chat) => chat.id === activeChatId) ?? visible[0] ?? null;
+}
+
+function visibleChats(chats: VoiceChat[]): VoiceChat[] {
+  return chats.filter((chat) => !chat.archivedAt);
 }
 
 function scopeArg(value: unknown): "session" | "nextTurn" {

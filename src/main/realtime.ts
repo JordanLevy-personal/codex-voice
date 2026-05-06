@@ -96,6 +96,11 @@ function realtimeInstructions(): string {
     "- You do NOT inspect files, infer computer state, choose Codex tools, or invent context.",
     "- Codex is the actual computer-use agent. Your job is to pass the user's request to Codex.",
     "- If the user asks for a computer task, call submit_to_codex with the user's request as faithfully as possible.",
+    "- If the user asks to create a session or chat and gives an explicit name, use that name.",
+    "- If the user asks to create a session or chat with useful context but without an explicit name, create a short, clear, relevant 2-6 word name from that context.",
+    "- If the user asks to create a session or chat without a name or useful context, or the name would be ambiguous, ask: What would you like to use this chat or session for?",
+    "- Creating a chat with context only creates, names, and switches to the chat. Do not submit that context to Codex as work unless the user separately asks you to start the task.",
+    "- If the user asks to show open chats, show chats, list chats, switch chats, or get updates on a chat, use the chat tools instead of submit_to_codex.",
     "- Only add context that came from the current live voice conversation.",
     "- Do not make the task more ambitious than what the user asked.",
     "",
@@ -110,6 +115,7 @@ function realtimeInstructions(): string {
     "- If the user says cancel, stop, or abort in response to an approval, call answer_codex_approval with decision cancel.",
     "- If Codex asks a question and the user answers by voice, call answer_codex_question.",
     "- When asked for status, use get_codex_status instead of guessing.",
+    "- When asked for chat-specific status or updates, use get_codex_chat_status.",
     "- When asked which Codex model or reasoning effort is in use, use get_codex_status.",
     "- When asked to change Codex model or reasoning effort, use set_codex_model or set_codex_reasoning_effort.",
   ].join("\n");
@@ -133,6 +139,14 @@ function realtimeTools(): unknown[] {
             type: "string",
             description: "Brief relevant context from the current voice conversation only.",
           },
+          chatId: {
+            type: "string",
+            description: "Optional target chat id when the user explicitly names a chat and it has already been resolved.",
+          },
+          chatName: {
+            type: "string",
+            description: "Optional target chat name when the user explicitly names an existing chat.",
+          },
         },
         required: ["request"],
       },
@@ -145,6 +159,8 @@ function realtimeTools(): unknown[] {
         type: "object",
         properties: {
           message: { type: "string" },
+          chatId: { type: "string" },
+          chatName: { type: "string" },
         },
         required: ["message"],
       },
@@ -157,6 +173,8 @@ function realtimeTools(): unknown[] {
         type: "object",
         properties: {
           reason: { type: "string" },
+          chatId: { type: "string" },
+          chatName: { type: "string" },
         },
       },
     },
@@ -260,12 +278,72 @@ function realtimeTools(): unknown[] {
     {
       type: "function",
       name: "create_new_codex_session",
-      description: "Create a new Codex voice session with a fresh Documents workspace folder.",
+      description:
+        "Create a new Codex voice session with a fresh Documents workspace folder. Provide a short name when available or infer one from useful context; ask the user what the session is for if no useful name/context exists.",
       parameters: {
         type: "object",
         properties: {
           name: { type: "string" },
         },
+      },
+    },
+    {
+      type: "function",
+      name: "create_new_codex_chat",
+      description:
+        "Create a new chat/thread inside the current Codex voice session, make it active, and do not submit work to Codex. Requires a short clear name; ask the user what the chat is for if no useful name/context exists.",
+      parameters: {
+        type: "object",
+        properties: {
+          name: { type: "string" },
+          context: {
+            type: "string",
+            description: "Context used only to choose the chat name, not submitted to Codex as a task.",
+          },
+        },
+        required: ["name"],
+      },
+    },
+    {
+      type: "function",
+      name: "list_codex_chats",
+      description: "List chats/threads in the current Codex voice session.",
+      parameters: {
+        type: "object",
+        properties: {},
+      },
+    },
+    {
+      type: "function",
+      name: "switch_codex_chat",
+      description: "Switch the active chat in the current Codex voice session by id or name.",
+      parameters: {
+        type: "object",
+        properties: {
+          chatId: { type: "string" },
+          name: { type: "string" },
+        },
+      },
+    },
+    {
+      type: "function",
+      name: "get_codex_chat_status",
+      description: "Get updates/status for one chat or all chats in the current session.",
+      parameters: {
+        type: "object",
+        properties: {
+          chatId: { type: "string" },
+          name: { type: "string" },
+        },
+      },
+    },
+    {
+      type: "function",
+      name: "show_open_codex_chats",
+      description: "Open the current session's chat drawer, equivalent to clicking the active session card.",
+      parameters: {
+        type: "object",
+        properties: {},
       },
     },
     {
@@ -291,11 +369,13 @@ function realtimeTools(): unknown[] {
     {
       type: "function",
       name: "summarize_recent_session",
-      description: "Ask Codex to summarize a recent session, then return that summary for voice narration.",
+      description: "Ask Codex to summarize a recent session or chat, then return that summary for voice narration.",
       parameters: {
         type: "object",
         properties: {
           sessionId: { type: "string" },
+          chatId: { type: "string" },
+          chatName: { type: "string" },
         },
       },
     },
