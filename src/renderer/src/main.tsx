@@ -1,11 +1,14 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import {
+  CODEX_PERMISSION_PROFILES,
   DEFAULT_CODEX_MODEL,
+  DEFAULT_CODEX_PERMISSION_MODE,
   DEFAULT_CODEX_REASONING_EFFORT,
   type AppEvent,
   type AppState,
   type CodexModelSummary,
+  type CodexPermissionMode,
   type CodexThreadTokenUsage,
   type PendingCodexRequest,
   type PendingRequestQuestion,
@@ -37,14 +40,19 @@ const emptyState: AppState = {
   codexSettings: {
     chatModel: null,
     chatReasoningEffort: null,
+    chatPermissionMode: DEFAULT_CODEX_PERMISSION_MODE,
     sessionModel: null,
     sessionReasoningEffort: null,
+    sessionPermissionMode: DEFAULT_CODEX_PERMISSION_MODE,
     nextTurnModel: null,
     nextTurnReasoningEffort: null,
+    nextTurnPermissionMode: null,
     activeTurnModel: null,
     activeTurnReasoningEffort: null,
+    activeTurnPermissionMode: null,
     defaultModel: DEFAULT_CODEX_MODEL,
     defaultReasoningEffort: DEFAULT_CODEX_REASONING_EFFORT,
+    defaultPermissionMode: DEFAULT_CODEX_PERMISSION_MODE,
     models: [],
   },
   realtime: {
@@ -285,6 +293,7 @@ function VoiceHome({
   const [archivedOpen, setArchivedOpen] = useState(false);
   const [chatsOpen, setChatsOpen] = useState(false);
   const [modelOpen, setModelOpen] = useState(false);
+  const [permissionsOpen, setPermissionsOpen] = useState(false);
   const [apiKeyOpen, setApiKeyOpen] = useState(false);
   const [contextMenu, setContextMenu] = useState<ContextMenuTarget | null>(null);
   const [apiKey, setApiKey] = useState("");
@@ -311,6 +320,12 @@ function VoiceHome({
     state.codexSettings.chatReasoningEffort ??
     state.codexSettings.defaultReasoningEffort ??
     DEFAULT_CODEX_REASONING_EFFORT;
+  const effectivePermissionMode =
+    state.codexSettings.nextTurnPermissionMode ??
+    state.codexSettings.chatPermissionMode ??
+    state.codexSettings.defaultPermissionMode ??
+    DEFAULT_CODEX_PERMISSION_MODE;
+  const effectivePermission = permissionProfile(effectivePermissionMode);
   const modelOptions = modelsForValue(state.codexSettings.models, effectiveModel);
   const pendingRequests = state.runtime.pendingRequests;
   const primaryPendingRequest = pendingRequests[0] ?? null;
@@ -582,6 +597,7 @@ function VoiceHome({
                 </div>
               </div>
             )}
+
           </section>
 
           <section className="voice-hero" aria-label="Voice status">
@@ -674,9 +690,39 @@ function VoiceHome({
         <footer className="voice-footer">
           <span className={`voice-dot ${state.runtime.ready ? "ready" : ""}`} />
           <span>{state.runtime.ready ? "Codex app-server connected" : "Codex app-server starting"}</span>
-          <button className="voice-footer-gear" aria-label="Open debug UI" onClick={() => void onShowDebug()}>
-            <GearIcon />
-          </button>
+          <div className="voice-permission-wrap footer-permissions">
+            <button
+              className={`voice-permission-trigger ${effectivePermissionMode}`}
+              aria-expanded={permissionsOpen}
+              onClick={() => setPermissionsOpen((current) => !current)}
+            >
+              <ShieldIcon />
+              <span>{effectivePermission.displayName}</span>
+              <DownIcon />
+            </button>
+
+            {permissionsOpen && (
+              <div className="voice-permission-menu" role="menu">
+                {CODEX_PERMISSION_PROFILES.map((profile) => (
+                  <button
+                    key={profile.mode}
+                    className={profile.mode === effectivePermissionMode ? "selected" : ""}
+                    role="menuitemradio"
+                    aria-checked={profile.mode === effectivePermissionMode}
+                    onClick={() =>
+                      void onAction(() =>
+                        window.codexVoice.setCodexSettings({ permissionMode: profile.mode }, modelScope),
+                      )
+                    }
+                  >
+                    <ShieldIcon />
+                    <span>{profile.displayName}</span>
+                    {profile.mode === effectivePermissionMode && <CheckIcon />}
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
         </footer>
       </div>
 
@@ -1478,6 +1524,10 @@ function formatEffort(effort: string | null): string {
   return effort.slice(0, 1).toUpperCase() + effort.slice(1);
 }
 
+function permissionProfile(mode: CodexPermissionMode) {
+  return CODEX_PERMISSION_PROFILES.find((profile) => profile.mode === mode) ?? CODEX_PERMISSION_PROFILES[0];
+}
+
 function FolderIcon(): React.ReactElement {
   return (
     <svg viewBox="0 0 24 24" aria-hidden="true">
@@ -1506,6 +1556,16 @@ function CheckIcon(): React.ReactElement {
   return (
     <svg viewBox="0 0 24 24" aria-hidden="true">
       <path d="m5.5 12.5 4.25 4.25L18.5 7.25" />
+    </svg>
+  );
+}
+
+function ShieldIcon(): React.ReactElement {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <path d="M12 3.5 18.5 6v5.4c0 4.25-2.6 7.15-6.5 9.1-3.9-1.95-6.5-4.85-6.5-9.1V6L12 3.5Z" />
+      <path d="M12 8.2v4.25" />
+      <path d="M12 15.8h.01" />
     </svg>
   );
 }
@@ -1548,15 +1608,6 @@ function EllipsisIcon(): React.ReactElement {
   );
 }
 
-function GearIcon(): React.ReactElement {
-  return (
-    <svg viewBox="0 0 24 24" aria-hidden="true">
-      <path d="M9.5 3.9 10.25 2h3.5l.75 1.9 1.55.65 1.85-.8 2.45 2.45-.8 1.85.65 1.55 1.9.75v3.5l-1.9.75-.65 1.55.8 1.85-2.45 2.45-1.85-.8-1.55.65-.75 1.9h-3.5l-.75-1.9-1.55-.65-1.85.8-2.45-2.45.8-1.85-.65-1.55-1.9-.75v-3.5l1.9-.75.65-1.55-.8-1.85 2.45-2.45 1.85.8 1.55-.65Z" />
-      <path d="M8.75 12a3.25 3.25 0 1 0 6.5 0 3.25 3.25 0 0 0-6.5 0Z" />
-    </svg>
-  );
-}
-
 function CloseIcon(): React.ReactElement {
   return (
     <svg viewBox="0 0 24 24" aria-hidden="true">
@@ -1578,6 +1629,8 @@ function CodexSettingsPanel({
   const nextTurnModel = state.codexSettings.nextTurnModel ?? "";
   const chatEffort = state.codexSettings.chatReasoningEffort ?? "";
   const nextTurnEffort = state.codexSettings.nextTurnReasoningEffort ?? "";
+  const chatPermissionMode = state.codexSettings.chatPermissionMode;
+  const nextTurnPermissionMode = state.codexSettings.nextTurnPermissionMode ?? "";
   const chatModelOptions = modelsForValue(models, chatModel);
   const nextTurnModelOptions = modelsForValue(models, nextTurnModel);
 
@@ -1588,21 +1641,33 @@ function CodexSettingsPanel({
           label="Default"
           model={state.codexSettings.defaultModel ?? "unknown"}
           effort={state.codexSettings.defaultReasoningEffort ?? "unknown"}
+          permission={permissionProfile(state.codexSettings.defaultPermissionMode).displayName}
         />
         <SettingReadout
           label="Chat"
           model={state.codexSettings.chatModel ?? "default"}
           effort={state.codexSettings.chatReasoningEffort ?? "default"}
+          permission={permissionProfile(state.codexSettings.chatPermissionMode).displayName}
         />
         <SettingReadout
           label="Next Turn"
           model={state.codexSettings.nextTurnModel ?? "chat/default"}
           effort={state.codexSettings.nextTurnReasoningEffort ?? "chat/default"}
+          permission={
+            state.codexSettings.nextTurnPermissionMode
+              ? permissionProfile(state.codexSettings.nextTurnPermissionMode).displayName
+              : "chat/default"
+          }
         />
         <SettingReadout
           label="Active Turn"
           model={state.codexSettings.activeTurnModel ?? "none"}
           effort={state.codexSettings.activeTurnReasoningEffort ?? "none"}
+          permission={
+            state.codexSettings.activeTurnPermissionMode
+              ? permissionProfile(state.codexSettings.activeTurnPermissionMode).displayName
+              : "none"
+          }
         />
       </div>
 
@@ -1651,6 +1716,28 @@ function CodexSettingsPanel({
         </label>
 
         <label>
+          Chat permissions
+          <select
+            value={chatPermissionMode}
+            disabled={!state.activeSession}
+            onChange={(event) =>
+              void onAction(() =>
+                window.codexVoice.setCodexSettings(
+                  { permissionMode: event.target.value as CodexPermissionMode },
+                  "chat",
+                ),
+              )
+            }
+          >
+            {CODEX_PERMISSION_PROFILES.map((profile) => (
+              <option key={profile.mode} value={profile.mode}>
+                {profile.displayName}
+              </option>
+            ))}
+          </select>
+        </label>
+
+        <label>
           Next-turn model
           <select
             value={nextTurnModel}
@@ -1690,6 +1777,28 @@ function CodexSettingsPanel({
             ))}
           </select>
         </label>
+
+        <label>
+          Next-turn permissions
+          <select
+            value={nextTurnPermissionMode}
+            onChange={(event) =>
+              void onAction(() =>
+                window.codexVoice.setCodexSettings(
+                  { permissionMode: (event.target.value || null) as CodexPermissionMode | null },
+                  "nextTurn",
+                ),
+              )
+            }
+          >
+            <option value="">Use chat/default</option>
+            {CODEX_PERMISSION_PROFILES.map((profile) => (
+              <option key={profile.mode} value={profile.mode}>
+                {profile.displayName}
+              </option>
+            ))}
+          </select>
+        </label>
       </div>
     </section>
   );
@@ -1699,16 +1808,19 @@ function SettingReadout({
   label,
   model,
   effort,
+  permission,
 }: {
   label: string;
   model: string;
   effort: string;
+  permission: string;
 }): React.ReactElement {
   return (
     <div className="setting-readout">
       <span>{label}</span>
       <strong>{model}</strong>
       <small>{effort}</small>
+      <small>{permission}</small>
     </div>
   );
 }

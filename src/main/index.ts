@@ -8,6 +8,7 @@ import { SessionStore } from "./sessionStore";
 import type {
   ApprovalDecision,
   AppEvent,
+  CodexPermissionMode,
   CodexSettingsScope,
   ReasoningEffort,
   ToolQuestionAnswer,
@@ -224,7 +225,11 @@ function registerIpc(): void {
     (
       _event,
       payload: {
-        settings: { model?: string | null; reasoningEffort?: ReasoningEffort | null };
+        settings: {
+          model?: string | null;
+          reasoningEffort?: ReasoningEffort | null;
+          permissionMode?: CodexPermissionMode | null;
+        };
         scope: CodexSettingsScope;
       },
     ) => requireOrchestrator().setCodexSettings(payload.settings, payload.scope),

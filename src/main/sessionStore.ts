@@ -5,7 +5,9 @@ import { mkdir, readFile, readdir, rename, rmdir, stat, unlink, writeFile } from
 import path from "node:path";
 import {
   DEFAULT_CODEX_MODEL,
+  DEFAULT_CODEX_PERMISSION_MODE,
   DEFAULT_CODEX_REASONING_EFFORT,
+  type CodexPermissionMode,
   type ReasoningEffort,
   type VoiceChat,
   type VoiceSession,
@@ -96,6 +98,7 @@ export class SessionStore {
       codexThreadId: null,
       model: null,
       reasoningEffort: null,
+      permissionMode: DEFAULT_CODEX_PERMISSION_MODE,
       createdAt: now.toISOString(),
       updatedAt: now.toISOString(),
       archivedAt: null,
@@ -159,7 +162,7 @@ export class SessionStore {
     sessionId: string,
     displayName: string,
     codexThreadId: string,
-    settings: { model?: string | null; reasoningEffort?: ReasoningEffort | null } = {},
+    settings: { model?: string | null; reasoningEffort?: ReasoningEffort | null; permissionMode?: CodexPermissionMode } = {},
   ): Promise<VoiceSession> {
     const existing = await this.getSession(sessionId);
     if (!existing) {
@@ -170,12 +173,14 @@ export class SessionStore {
     const model = settings.model ?? existing.model ?? DEFAULT_CODEX_MODEL;
     const reasoningEffort =
       settings.reasoningEffort ?? existing.reasoningEffort ?? DEFAULT_CODEX_REASONING_EFFORT;
+    const permissionMode = settings.permissionMode ?? existing.permissionMode ?? DEFAULT_CODEX_PERMISSION_MODE;
     const chat: VoiceChat = {
       id: randomUUID(),
       displayName: displayName.trim() || "New chat",
       codexThreadId,
       model,
       reasoningEffort,
+      permissionMode,
       createdAt: now,
       updatedAt: now,
       archivedAt: null,
@@ -418,9 +423,10 @@ function normalizeSession(value: unknown): VoiceSession {
   const legacyModel = stringOrNull(session.model) ?? DEFAULT_CODEX_MODEL;
   const legacyReasoningEffort =
     reasoningEffortOrNull(session.reasoningEffort) ?? DEFAULT_CODEX_REASONING_EFFORT;
+  const legacyPermissionMode = permissionModeOrDefault(session.permissionMode);
   let chats = Array.isArray(session.chats)
     ? session.chats
-        .map((chat) => normalizeChat(chat, createdAt, updatedAt, legacyModel, legacyReasoningEffort))
+        .map((chat) => normalizeChat(chat, createdAt, updatedAt, legacyModel, legacyReasoningEffort, legacyPermissionMode))
         .filter((chat) => chat.id)
     : [];
 
@@ -432,6 +438,7 @@ function normalizeSession(value: unknown): VoiceSession {
         codexThreadId: legacyThreadId,
         model: legacyModel,
         reasoningEffort: legacyReasoningEffort,
+        permissionMode: legacyPermissionMode,
         createdAt,
         updatedAt,
         archivedAt: null,
@@ -458,6 +465,7 @@ function normalizeSession(value: unknown): VoiceSession {
     codexThreadId: activeChat?.codexThreadId ?? null,
     model: stringOrNull(session.model),
     reasoningEffort: reasoningEffortOrNull(session.reasoningEffort),
+    permissionMode: permissionModeOrDefault(session.permissionMode),
   };
 }
 
@@ -467,14 +475,16 @@ function normalizeChat(
   fallbackUpdatedAt: string,
   fallbackModel: string,
   fallbackReasoningEffort: ReasoningEffort,
+  fallbackPermissionMode: CodexPermissionMode,
 ): VoiceChat {
-  const chat = value as VoiceChat & { reasoningEffort?: ReasoningEffort | null };
+  const chat = value as VoiceChat & { reasoningEffort?: ReasoningEffort | null; permissionMode?: CodexPermissionMode };
   return {
     id: String(chat.id ?? randomUUID()),
     displayName: String(chat.displayName ?? "Main task"),
     codexThreadId: stringOrNull(chat.codexThreadId),
     model: stringOrNull(chat.model) ?? fallbackModel,
     reasoningEffort: reasoningEffortOrNull(chat.reasoningEffort) ?? fallbackReasoningEffort,
+    permissionMode: permissionModeOrDefault(chat.permissionMode, fallbackPermissionMode),
     createdAt: stringOrNow(chat.createdAt, fallbackCreatedAt),
     updatedAt: stringOrNow(chat.updatedAt, fallbackUpdatedAt),
     archivedAt: stringOrNull(chat.archivedAt),
@@ -491,6 +501,12 @@ function reasoningEffortOrNull(value: unknown): ReasoningEffort | null {
   return typeof value === "string" && ["none", "minimal", "low", "medium", "high", "xhigh"].includes(value)
     ? (value as ReasoningEffort)
     : null;
+}
+
+function permissionModeOrDefault(value: unknown, fallback = DEFAULT_CODEX_PERMISSION_MODE): CodexPermissionMode {
+  return typeof value === "string" && ["default", "auto-review", "full-access"].includes(value)
+    ? (value as CodexPermissionMode)
+    : fallback;
 }
 
 function stringOrNow(value: unknown, fallback = new Date().toISOString()): string {

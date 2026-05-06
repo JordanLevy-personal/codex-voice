@@ -3,6 +3,7 @@ import type {
   AppEvent,
   AppState,
   ApprovalDecision,
+  CodexPermissionMode,
   CodexSettingsScope,
   CodexVoiceApi,
   ReasoningEffort,
@@ -32,7 +33,7 @@ const api: CodexVoiceApi = {
   interruptCodex: (chatId?: string) => ipcRenderer.invoke("codex:interrupt", { chatId }),
   getChatStatus: (chatId?: string) => ipcRenderer.invoke("chats:status", { chatId }),
   setCodexSettings: (
-    settings: { model?: string | null; reasoningEffort?: ReasoningEffort | null },
+    settings: { model?: string | null; reasoningEffort?: ReasoningEffort | null; permissionMode?: CodexPermissionMode | null },
     scope: CodexSettingsScope,
   ) => ipcRenderer.invoke("codex:setSettings", { settings, scope }),
   answerApproval: (requestId: string | number, decision: ApprovalDecision) =>

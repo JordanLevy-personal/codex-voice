@@ -1,7 +1,43 @@
 export type ReasoningEffort = "none" | "minimal" | "low" | "medium" | "high" | "xhigh";
+export type CodexApprovalPolicy = "untrusted" | "on-failure" | "on-request" | "never";
+export type CodexSandboxMode = "read-only" | "workspace-write" | "danger-full-access";
+export type CodexPermissionMode = "default" | "auto-review" | "full-access";
+
+export type CodexPermissionProfile = {
+  mode: CodexPermissionMode;
+  displayName: string;
+  description: string;
+  approvalPolicy: CodexApprovalPolicy;
+  sandbox: CodexSandboxMode;
+};
 
 export const DEFAULT_CODEX_MODEL = "gpt-5.5";
 export const DEFAULT_CODEX_REASONING_EFFORT: ReasoningEffort = "medium";
+export const DEFAULT_CODEX_PERMISSION_MODE: CodexPermissionMode = "default";
+
+export const CODEX_PERMISSION_PROFILES: CodexPermissionProfile[] = [
+  {
+    mode: "default",
+    displayName: "Default permissions",
+    description: "Ask when Codex decides approval is needed.",
+    approvalPolicy: "on-request",
+    sandbox: "workspace-write",
+  },
+  {
+    mode: "auto-review",
+    displayName: "Auto-review",
+    description: "Work automatically inside the workspace sandbox.",
+    approvalPolicy: "never",
+    sandbox: "workspace-write",
+  },
+  {
+    mode: "full-access",
+    displayName: "Full access",
+    description: "Run without approval prompts or filesystem sandboxing.",
+    approvalPolicy: "never",
+    sandbox: "danger-full-access",
+  },
+];
 
 export type CodexModelSummary = {
   id: string;
@@ -22,15 +58,20 @@ export type CodexSettingsScope = "chat" | "session" | "nextTurn";
 export type CodexSettings = {
   chatModel: string | null;
   chatReasoningEffort: ReasoningEffort | null;
+  chatPermissionMode: CodexPermissionMode;
   /** Compatibility aliases for older renderer/voice callers. */
   sessionModel: string | null;
   sessionReasoningEffort: ReasoningEffort | null;
+  sessionPermissionMode: CodexPermissionMode;
   nextTurnModel: string | null;
   nextTurnReasoningEffort: ReasoningEffort | null;
+  nextTurnPermissionMode: CodexPermissionMode | null;
   activeTurnModel: string | null;
   activeTurnReasoningEffort: ReasoningEffort | null;
+  activeTurnPermissionMode: CodexPermissionMode | null;
   defaultModel: string | null;
   defaultReasoningEffort: ReasoningEffort | null;
+  defaultPermissionMode: CodexPermissionMode;
   models: CodexModelSummary[];
 };
 
@@ -40,6 +81,7 @@ export type VoiceChat = {
   codexThreadId: string | null;
   model: string | null;
   reasoningEffort: ReasoningEffort | null;
+  permissionMode: CodexPermissionMode;
   createdAt: string;
   updatedAt: string;
   archivedAt: string | null;
@@ -57,6 +99,7 @@ export type VoiceSession = {
   codexThreadId: string | null;
   model: string | null;
   reasoningEffort: ReasoningEffort | null;
+  permissionMode: CodexPermissionMode;
   createdAt: string;
   updatedAt: string;
   archivedAt: string | null;
@@ -220,7 +263,7 @@ export type CodexVoiceApi = {
   interruptCodex(chatId?: string): Promise<void>;
   getChatStatus(chatId?: string): Promise<CodexChatRuntime[]>;
   setCodexSettings(
-    settings: { model?: string | null; reasoningEffort?: ReasoningEffort | null },
+    settings: { model?: string | null; reasoningEffort?: ReasoningEffort | null; permissionMode?: CodexPermissionMode | null },
     scope: CodexSettingsScope,
   ): Promise<CodexSettings>;
   answerApproval(requestId: string | number, decision: ApprovalDecision): Promise<void>;

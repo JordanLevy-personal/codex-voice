@@ -1,14 +1,17 @@
 import { EventEmitter } from "node:events";
 import type {
   AppEvent,
+  CodexApprovalPolicy,
   AppState,
   ApprovalDecision,
   CodexActionResult,
   CodexChatRuntime,
   CodexModelSummary,
+  CodexPermissionMode,
   VoiceChat,
   CodexSettings,
   CodexSettingsScope,
+  CodexSandboxMode,
   CodexThreadTokenUsage,
   CodexRuntimeState,
   PendingRequestDetail,
@@ -20,7 +23,9 @@ import type {
   VoiceSession,
 } from "../shared/types";
 import {
+  CODEX_PERMISSION_PROFILES,
   DEFAULT_CODEX_MODEL,
+  DEFAULT_CODEX_PERMISSION_MODE,
   DEFAULT_CODEX_REASONING_EFFORT,
 } from "../shared/types";
 import { CodexBridge, type CodexJsonMessage } from "./codexBridge";
@@ -51,8 +56,10 @@ export class VoiceCodexOrchestrator extends EventEmitter {
   private showSessionChatsFlag = false;
   private nextTurnModel: string | null = null;
   private nextTurnReasoningEffort: ReasoningEffort | null = null;
+  private nextTurnPermissionMode: CodexPermissionMode | null = null;
   private defaultModel: string | null = DEFAULT_CODEX_MODEL;
   private defaultReasoningEffort: ReasoningEffort | null = DEFAULT_CODEX_REASONING_EFFORT;
+  private defaultPermissionMode: CodexPermissionMode = DEFAULT_CODEX_PERMISSION_MODE;
   private models: CodexModelSummary[] = [];
   private status = "Starting Codex app-server.";
   private pendingRequests = new Map<string, PendingCodexRequest>();
@@ -60,6 +67,7 @@ export class VoiceCodexOrchestrator extends EventEmitter {
   private activeTurnByThread = new Map<string, string>();
   private activeTurnModelByThread = new Map<string, string | null>();
   private activeTurnReasoningEffortByThread = new Map<string, ReasoningEffort | null>();
+  private activeTurnPermissionModeByThread = new Map<string, CodexPermissionMode | null>();
   private threadByTurn = new Map<string, string>();
   private tokenUsageByThread = new Map<string, CodexThreadTokenUsage>();
   private threadStatusByThread = new Map<string, string>();
@@ -120,8 +128,7 @@ export class VoiceCodexOrchestrator extends EventEmitter {
     const result = (await this.codex.request("thread/start", {
       cwd: session.folderPath,
       ...(chatSettings.model ? { model: chatSettings.model } : {}),
-      approvalPolicy: "on-request",
-      sandbox: "workspace-write",
+      ...permissionParams(chatSettings.permissionMode),
       personality: "friendly",
       serviceName: "codex_voice",
     })) as { thread?: { id?: string } };
@@ -293,7 +300,7 @@ export class VoiceCodexOrchestrator extends EventEmitter {
     const result = (await this.codex.request("turn/start", {
       threadId: chat.codexThreadId,
       cwd: session.folderPath,
-      approvalPolicy: "on-request",
+      ...permissionParams(turnSettings.permissionMode),
       personality: "friendly",
       ...(turnSettings.model ? { model: turnSettings.model } : {}),
       ...(turnSettings.reasoningEffort ? { effort: turnSettings.reasoningEffort } : {}),
@@ -313,8 +320,10 @@ export class VoiceCodexOrchestrator extends EventEmitter {
     this.threadByTurn.set(turnId, chat.codexThreadId);
     this.activeTurnModelByThread.set(chat.codexThreadId, turnSettings.model);
     this.activeTurnReasoningEffortByThread.set(chat.codexThreadId, turnSettings.reasoningEffort);
+    this.activeTurnPermissionModeByThread.set(chat.codexThreadId, turnSettings.permissionMode);
     this.nextTurnModel = null;
     this.nextTurnReasoningEffort = null;
+    this.nextTurnPermissionMode = null;
     this.status = `${chat.displayName}: Codex is working.`;
     const updated = await this.store.updateChat(session.id, chat.id, {
       lastStatus: "Codex is working.",
@@ -392,7 +401,7 @@ export class VoiceCodexOrchestrator extends EventEmitter {
     const result = (await this.codex.request("turn/start", {
       threadId: resumedThreadId,
       cwd: resumed.session.folderPath,
-      approvalPolicy: "on-request",
+      ...permissionParams(turnSettings.permissionMode),
       personality: "friendly",
       ...(turnSettings.model ? { model: turnSettings.model } : {}),
       ...(turnSettings.reasoningEffort ? { effort: turnSettings.reasoningEffort } : {}),
@@ -412,8 +421,10 @@ export class VoiceCodexOrchestrator extends EventEmitter {
     this.threadByTurn.set(turnId, resumedThreadId);
     this.activeTurnModelByThread.set(resumedThreadId, turnSettings.model);
     this.activeTurnReasoningEffortByThread.set(resumedThreadId, turnSettings.reasoningEffort);
+    this.activeTurnPermissionModeByThread.set(resumedThreadId, turnSettings.permissionMode);
     this.nextTurnModel = null;
     this.nextTurnReasoningEffort = null;
+    this.nextTurnPermissionMode = null;
     this.status = `Codex is summarizing "${resumed.chat.displayName}".`;
     this.emitEvent("app", "summaryStarted", `Summarizing "${resumed.chat.displayName}".`, {
       turnId,
@@ -598,7 +609,7 @@ export class VoiceCodexOrchestrator extends EventEmitter {
   }
 
   async setCodexSettings(
-    settings: { model?: string | null; reasoningEffort?: ReasoningEffort | null },
+    settings: { model?: string | null; reasoningEffort?: ReasoningEffort | null; permissionMode?: CodexPermissionMode | null },
     scope: CodexSettingsScope,
   ): Promise<CodexSettings> {
     if (settings.model !== undefined && settings.model !== null) {
@@ -607,16 +618,20 @@ export class VoiceCodexOrchestrator extends EventEmitter {
     if (settings.reasoningEffort !== undefined && settings.reasoningEffort !== null) {
       this.assertReasoningEffort(settings.reasoningEffort);
     }
+    if (settings.permissionMode !== undefined && settings.permissionMode !== null) {
+      this.assertPermissionMode(settings.permissionMode);
+    }
 
     if (scope === "nextTurn") {
       if (settings.model !== undefined) this.nextTurnModel = settings.model;
       if (settings.reasoningEffort !== undefined) {
         this.nextTurnReasoningEffort = settings.reasoningEffort;
       }
+      if (settings.permissionMode !== undefined) this.nextTurnPermissionMode = settings.permissionMode;
       this.status = `Updated next-turn Codex settings: ${this.describeModelEffort(
         this.nextTurnModel,
         this.nextTurnReasoningEffort,
-      )}.`;
+      )}, ${this.describePermissions(this.nextTurnPermissionMode ?? DEFAULT_CODEX_PERMISSION_MODE)}.`;
       this.emitEvent("app", "settingsChanged", this.status);
       this.emitState();
       return this.codexSettings(await this.getActiveSession());
@@ -628,13 +643,16 @@ export class VoiceCodexOrchestrator extends EventEmitter {
       ...(settings.reasoningEffort !== undefined
         ? { reasoningEffort: settings.reasoningEffort }
         : {}),
-      lastStatus: "Updated Codex model settings.",
+      ...(settings.permissionMode !== undefined
+        ? { permissionMode: settings.permissionMode ?? DEFAULT_CODEX_PERMISSION_MODE }
+        : {}),
+      lastStatus: "Updated Codex settings.",
     });
     const updatedChat = updated.chats.find((candidate) => candidate.id === chat.id) ?? chat;
     this.status = `Updated chat Codex settings: ${this.describeModelEffort(
       updatedChat.model,
       updatedChat.reasoningEffort,
-    )}.`;
+    )}, ${this.describePermissions(updatedChat.permissionMode)}.`;
     this.emitEvent("app", "settingsChanged", this.status, updated);
     this.emitState();
     return this.codexSettings(updated);
@@ -707,8 +725,7 @@ export class VoiceCodexOrchestrator extends EventEmitter {
       await this.codex.request("thread/resume", {
         threadId: chat.codexThreadId,
         cwd: session.folderPath,
-        approvalPolicy: "on-request",
-        sandbox: "workspace-write",
+        ...permissionParams(chatSettings.permissionMode),
         personality: "friendly",
         excludeTurns: true,
         ...(chatSettings.model ? { model: chatSettings.model } : {}),
@@ -721,8 +738,7 @@ export class VoiceCodexOrchestrator extends EventEmitter {
     const result = (await this.codex.request("thread/start", {
       cwd: session.folderPath,
       ...(chatSettings.model ? { model: chatSettings.model } : {}),
-      approvalPolicy: "on-request",
-      sandbox: "workspace-write",
+      ...permissionParams(chatSettings.permissionMode),
       personality: "friendly",
       serviceName: "codex_voice",
     })) as { thread?: { id?: string } };
@@ -751,8 +767,7 @@ export class VoiceCodexOrchestrator extends EventEmitter {
     const result = (await this.codex.request("thread/start", {
       cwd: session.folderPath,
       ...(chatSettings.model ? { model: chatSettings.model } : {}),
-      approvalPolicy: "on-request",
-      sandbox: "workspace-write",
+      ...permissionParams(chatSettings.permissionMode),
       personality: "friendly",
       serviceName: "codex_voice",
     })) as { thread?: { id?: string } };
@@ -990,19 +1005,27 @@ export class VoiceCodexOrchestrator extends EventEmitter {
     const activeThreadId = activeChat?.codexThreadId ?? null;
     const chatModel = activeChat?.model ?? activeSession?.model ?? null;
     const chatReasoningEffort = activeChat?.reasoningEffort ?? activeSession?.reasoningEffort ?? null;
+    const chatPermissionMode = activeChat?.permissionMode ?? activeSession?.permissionMode ?? this.defaultPermissionMode;
     return {
       chatModel,
       chatReasoningEffort,
+      chatPermissionMode,
       sessionModel: chatModel,
       sessionReasoningEffort: chatReasoningEffort,
+      sessionPermissionMode: chatPermissionMode,
       nextTurnModel: this.nextTurnModel,
       nextTurnReasoningEffort: this.nextTurnReasoningEffort,
+      nextTurnPermissionMode: this.nextTurnPermissionMode,
       activeTurnModel: activeThreadId ? this.activeTurnModelByThread.get(activeThreadId) ?? null : null,
       activeTurnReasoningEffort: activeThreadId
         ? this.activeTurnReasoningEffortByThread.get(activeThreadId) ?? null
         : null,
+      activeTurnPermissionMode: activeThreadId
+        ? this.activeTurnPermissionModeByThread.get(activeThreadId) ?? null
+        : null,
       defaultModel: this.defaultModel,
       defaultReasoningEffort: this.defaultReasoningEffort,
+      defaultPermissionMode: this.defaultPermissionMode,
       models: this.models,
     };
   }
@@ -1010,6 +1033,7 @@ export class VoiceCodexOrchestrator extends EventEmitter {
   private resolveTurnSettings(session: VoiceSession, chat?: VoiceChat | null): {
     model: string | null;
     reasoningEffort: ReasoningEffort | null;
+    permissionMode: CodexPermissionMode;
   } {
     const settings = this.threadSettingsForChat(session, chat ?? activeChatForSession(session));
     return {
@@ -1017,17 +1041,20 @@ export class VoiceCodexOrchestrator extends EventEmitter {
       reasoningEffort:
         this.nextTurnReasoningEffort ??
         settings.reasoningEffort,
+      permissionMode: this.nextTurnPermissionMode ?? settings.permissionMode,
     };
   }
 
   private initialChatSettings(session: VoiceSession): {
     model: string | null;
     reasoningEffort: ReasoningEffort | null;
+    permissionMode: CodexPermissionMode;
   } {
     return {
       model: session.model ?? this.defaultModel ?? DEFAULT_CODEX_MODEL,
       reasoningEffort:
         session.reasoningEffort ?? this.defaultReasoningEffort ?? DEFAULT_CODEX_REASONING_EFFORT,
+      permissionMode: session.permissionMode ?? this.defaultPermissionMode,
     };
   }
 
@@ -1037,6 +1064,7 @@ export class VoiceCodexOrchestrator extends EventEmitter {
   ): {
     model: string | null;
     reasoningEffort: ReasoningEffort | null;
+    permissionMode: CodexPermissionMode;
   } {
     return {
       model: chat?.model ?? session.model ?? this.defaultModel ?? DEFAULT_CODEX_MODEL,
@@ -1045,6 +1073,7 @@ export class VoiceCodexOrchestrator extends EventEmitter {
         session.reasoningEffort ??
         this.defaultReasoningEffort ??
         DEFAULT_CODEX_REASONING_EFFORT,
+      permissionMode: chat?.permissionMode ?? session.permissionMode ?? this.defaultPermissionMode,
     };
   }
 
@@ -1062,6 +1091,10 @@ export class VoiceCodexOrchestrator extends EventEmitter {
 
     if (lowerCommand === "model" || lowerCommand === "models") {
       return this.handleModelSlash(args);
+    }
+
+    if (lowerCommand === "permissions" || lowerCommand === "approvals") {
+      return this.handlePermissionsSlash(args);
     }
 
     if (lowerCommand === "effort" || lowerCommand === "reasoning") {
@@ -1137,6 +1170,31 @@ export class VoiceCodexOrchestrator extends EventEmitter {
     return this.commandResult(`Updated /model for ${parsed.scope}.\n${settingsText(settings)}`, await this.getActiveSession());
   }
 
+  private async handlePermissionsSlash(args: string[]): Promise<CodexActionResult> {
+    const activeSession = await this.getActiveSession();
+    if (args.length === 0) {
+      return this.commandResult(
+        [
+          this.currentSettingsText(activeSession),
+          "",
+          "Permission modes",
+          ...CODEX_PERMISSION_PROFILES.map(
+            (profile) =>
+              `${profile.mode} - ${profile.displayName}: approval ${profile.approvalPolicy}, sandbox ${profile.sandbox}`,
+          ),
+        ].join("\n"),
+        activeSession,
+      );
+    }
+
+    const mode = permissionModeFromText(args.join(" "));
+    const settings = await this.setCodexSettings({ permissionMode: mode }, activeSession ? "chat" : "nextTurn");
+    return this.commandResult(
+      `Updated /permissions to ${permissionProfile(mode).displayName}.\n${settingsText(settings)}`,
+      await this.getActiveSession(),
+    );
+  }
+
   private async handleReviewSlash(args: string[]): Promise<CodexActionResult> {
     const { session, chat } = await this.requireChatContext();
     if (!chat.codexThreadId) throw new Error("Active chat is missing a Codex thread id.");
@@ -1154,6 +1212,7 @@ export class VoiceCodexOrchestrator extends EventEmitter {
       this.threadByTurn.set(turnId, chat.codexThreadId);
       this.activeTurnModelByThread.set(chat.codexThreadId, turnSettings.model);
       this.activeTurnReasoningEffortByThread.set(chat.codexThreadId, turnSettings.reasoningEffort);
+      this.activeTurnPermissionModeByThread.set(chat.codexThreadId, turnSettings.permissionMode);
     }
     const updated = await this.store.updateChat(session.id, chat.id, {
       lastStatus: "Codex review started.",
@@ -1219,6 +1278,7 @@ export class VoiceCodexOrchestrator extends EventEmitter {
       : {
           model: settings.nextTurnModel ?? settings.defaultModel,
           reasoningEffort: settings.nextTurnReasoningEffort ?? settings.defaultReasoningEffort,
+          permissionMode: settings.nextTurnPermissionMode ?? settings.defaultPermissionMode,
         };
     const tokenUsage = threadId ? this.tokenUsageByThread.get(threadId) ?? null : null;
     const [configSummary, rateLimitSummary] = await Promise.all([
@@ -1233,10 +1293,10 @@ export class VoiceCodexOrchestrator extends EventEmitter {
       `Folder: ${session?.folderPath ?? "none"}`,
       `Runtime: ${this.threadStatusByThread.get(threadId ?? "") ?? this.status}`,
       `Active turn: ${threadId ? this.activeTurnByThread.get(threadId) ?? "none" : "none"}`,
-      `Effective next turn: model ${resolved.model ?? "default"}, reasoning ${resolved.reasoningEffort ?? "default"}`,
-      `Chat override: model ${settings.chatModel ?? "default"}, reasoning ${settings.chatReasoningEffort ?? "default"}`,
-      `Active turn model: ${settings.activeTurnModel ?? "none"}, reasoning ${settings.activeTurnReasoningEffort ?? "none"}`,
-      `Voice app defaults: approval on-request, sandbox workspace-write.`,
+      `Effective next turn: model ${resolved.model ?? "default"}, reasoning ${resolved.reasoningEffort ?? "default"}, permissions ${permissionProfile(resolved.permissionMode).displayName}`,
+      `Chat override: model ${settings.chatModel ?? "default"}, reasoning ${settings.chatReasoningEffort ?? "default"}, permissions ${permissionProfile(settings.chatPermissionMode).displayName}`,
+      `Active turn model: ${settings.activeTurnModel ?? "none"}, reasoning ${settings.activeTurnReasoningEffort ?? "none"}, permissions ${settings.activeTurnPermissionMode ? permissionProfile(settings.activeTurnPermissionMode).displayName : "none"}`,
+      `Voice app defaults: ${permissionProfile(settings.defaultPermissionMode).displayName}.`,
       `Context: ${formatTokenUsage(tokenUsage)}`,
       `Rate limits: ${rateLimitSummary}`,
       configSummary,
@@ -1298,10 +1358,22 @@ export class VoiceCodexOrchestrator extends EventEmitter {
     }
   }
 
+  private assertPermissionMode(mode: string): asserts mode is CodexPermissionMode {
+    const allowed = CODEX_PERMISSION_PROFILES.map((profile) => profile.mode);
+    if (!allowed.includes(mode as CodexPermissionMode)) {
+      throw new Error(`Unknown permission mode "${mode}". Use one of: ${allowed.join(", ")}.`);
+    }
+  }
+
   private describeModelEffort(model: string | null, effort: ReasoningEffort | null): string {
     return `model ${model ?? this.defaultModel ?? "default"}, reasoning ${
       effort ?? this.defaultReasoningEffort ?? "default"
     }`;
+  }
+
+  private describePermissions(mode: CodexPermissionMode): string {
+    const profile = permissionProfile(mode);
+    return `permissions ${profile.displayName}`;
   }
 
   private updateChatForThread(threadId: string, patch: Partial<VoiceChat>): void {
@@ -1916,8 +1988,9 @@ function nativeSlashHelpText(): string {
     "/mcp [verbose] - list MCP servers reported by app-server.",
     "/apps - list apps/connectors reported by app-server.",
     "/plugins - list plugins reported by app-server.",
+    "/permissions [default|auto-review|full-access] - show or update chat permission mode.",
     "/new [name] and /resume [sessionId] - voice-session equivalents of Codex conversation controls.",
-    "Recognized but UI-only or not wired yet: /feedback, /plan-mode, /diff, /init, /permissions, /agent, /mention, /stop, /fork, /side, /clear, /copy, /quit.",
+    "Recognized but UI-only or not wired yet: /feedback, /plan-mode, /diff, /init, /agent, /mention, /stop, /fork, /side, /clear, /copy, /quit.",
   ].join("\n");
 }
 
@@ -1931,8 +2004,6 @@ function nativeUnsupportedSlashCommand(command: string): string | null {
       "Recognized native /plan. The v0 voice app intentionally routes tasks to Codex execution rather than switching this debug surface into plan mode.",
     diff: "Recognized native /diff. This debug UI does not render Codex's diff view yet.",
     init: "Recognized native /init. Ask Codex to create or update AGENTS.md as a normal task for now.",
-    permissions: "Recognized native /permissions. Permission-profile editing is not wired into this debug UI yet.",
-    approvals: "Recognized /approvals alias. Permission-profile editing is not wired into this debug UI yet.",
     "sandbox-add-read-dir":
       "Recognized native /sandbox-add-read-dir. Extra sandbox readable roots are not wired into this debug UI yet.",
     agent: "Recognized native /agent. Subagent thread switching is not exposed in this debug UI yet.",
@@ -2176,15 +2247,47 @@ function settingsText(settings: CodexSettings): string {
     settings.chatReasoningEffort ??
     settings.defaultReasoningEffort ??
     "default";
+  const effectiveNextPermissions =
+    settings.nextTurnPermissionMode ?? settings.chatPermissionMode ?? settings.defaultPermissionMode;
   return [
     `Current chat default: model ${settings.chatModel ?? settings.defaultModel ?? "default"}, reasoning ${
       settings.chatReasoningEffort ?? settings.defaultReasoningEffort ?? "default"
+    }, permissions ${permissionProfile(settings.chatPermissionMode).displayName}.`,
+    `Next turn: model ${effectiveNextModel}, reasoning ${effectiveNextEffort}, permissions ${
+      permissionProfile(effectiveNextPermissions).displayName
     }.`,
-    `Next turn: model ${effectiveNextModel}, reasoning ${effectiveNextEffort}.`,
     `Active turn: model ${settings.activeTurnModel ?? "none"}, reasoning ${
       settings.activeTurnReasoningEffort ?? "none"
+    }, permissions ${
+      settings.activeTurnPermissionMode ? permissionProfile(settings.activeTurnPermissionMode).displayName : "none"
     }.`,
   ].join("\n");
+}
+
+function permissionProfile(mode: CodexPermissionMode) {
+  return (
+    CODEX_PERMISSION_PROFILES.find((profile) => profile.mode === mode) ??
+    CODEX_PERMISSION_PROFILES[0]
+  );
+}
+
+function permissionParams(mode: CodexPermissionMode): {
+  approvalPolicy: CodexApprovalPolicy;
+  sandbox: CodexSandboxMode;
+} {
+  const profile = permissionProfile(mode);
+  return {
+    approvalPolicy: profile.approvalPolicy,
+    sandbox: profile.sandbox,
+  };
+}
+
+function permissionModeFromText(text: string): CodexPermissionMode {
+  const normalized = text.trim().toLowerCase().replace(/[_\s]+/g, "-");
+  if (["default", "default-permissions", "normal"].includes(normalized)) return "default";
+  if (["auto", "auto-review", "autoreview"].includes(normalized)) return "auto-review";
+  if (["full", "full-access", "danger", "danger-full-access"].includes(normalized)) return "full-access";
+  throw new Error("Unknown permission mode. Use default, auto-review, or full-access.");
 }
 
 function isMissingCodexThreadError(error: unknown): boolean {

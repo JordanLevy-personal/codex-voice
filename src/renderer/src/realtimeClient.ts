@@ -2,6 +2,7 @@ import type {
   AppEvent,
   ApprovalDecision,
   AppState,
+  CodexPermissionMode,
   CodexSettingsScope,
   PendingCodexRequest,
   ToolQuestionAnswer,
@@ -332,6 +333,14 @@ async function callVoiceTool(name: string, args: Record<string, unknown>): Promi
     return { ok: true, message: "Updated Codex reasoning effort settings.", settings };
   }
 
+  if (name === "set_codex_permissions") {
+    const settings = await window.codexVoice.setCodexSettings(
+      { permissionMode: permissionModeArg(args.permissionMode) },
+      scopeArg(args.scope),
+    );
+    return { ok: true, message: "Updated Codex permission settings.", settings };
+  }
+
   if (name === "create_new_codex_session") {
     const session = await window.codexVoice.createSession(optionalString(args.name));
     return { ok: true, session };
@@ -468,6 +477,15 @@ function reasoningEffortArg(value: unknown): "none" | "minimal" | "low" | "mediu
     throw new Error(`Unknown reasoning effort: ${effort}`);
   }
   return effort as (typeof allowed)[number];
+}
+
+function permissionModeArg(value: unknown): CodexPermissionMode {
+  const mode = stringArg(value).toLowerCase();
+  const normalized = mode.replace(/[_\s]+/g, "-");
+  if (["default", "default-permissions", "normal"].includes(normalized)) return "default";
+  if (["auto", "auto-review", "autoreview"].includes(normalized)) return "auto-review";
+  if (["full", "full-access", "danger", "danger-full-access"].includes(normalized)) return "full-access";
+  throw new Error(`Unknown permission mode: ${mode}`);
 }
 
 function approvalDecisionArg(value: unknown): ApprovalDecision {

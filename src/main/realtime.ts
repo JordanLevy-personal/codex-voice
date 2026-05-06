@@ -118,7 +118,7 @@ function realtimeInstructions(): string {
     "- When asked for status, use get_codex_status instead of guessing.",
     "- When asked for chat-specific status or updates, use get_codex_chat_status.",
     "- When asked which Codex model or reasoning effort is in use, use get_codex_status.",
-    "- When asked to change Codex model or reasoning effort, use set_codex_model or set_codex_reasoning_effort for the current chat unless the user says next turn only.",
+    "- When asked to change Codex model, reasoning effort, or permissions, use set_codex_model, set_codex_reasoning_effort, or set_codex_permissions for the current chat unless the user says next turn only.",
   ].join("\n");
 }
 
@@ -274,6 +274,27 @@ function realtimeTools(): unknown[] {
           },
         },
         required: ["reasoningEffort", "scope"],
+      },
+    },
+    {
+      type: "function",
+      name: "set_codex_permissions",
+      description:
+        "Set the Codex permission mode for the current chat, or next turn only if the user explicitly asks. Default permissions asks when Codex decides approval is needed; auto-review runs automatically inside the workspace sandbox; full access runs without approval prompts or filesystem sandboxing.",
+      parameters: {
+        type: "object",
+        properties: {
+          permissionMode: {
+            type: "string",
+            enum: ["default", "auto-review", "full-access"],
+          },
+          scope: {
+            type: "string",
+            enum: ["chat", "session", "nextTurn"],
+            description: "Use chat unless the user says this is only for the next request/turn. Session is a legacy alias for chat.",
+          },
+        },
+        required: ["permissionMode", "scope"],
       },
     },
     {
