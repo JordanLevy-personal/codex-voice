@@ -71,6 +71,17 @@ export type CodexSettings = {
   models: CodexModelSummary[];
 };
 
+export type CodexTurnOutput = {
+  threadId: string;
+  turnId: string;
+  status: string;
+  finalAssistantText: string;
+  startedAt: number | null;
+  completedAt: number | null;
+  durationMs: number | null;
+  errorMessage?: string;
+};
+
 export type VoiceChat = {
   id: string;
   displayName: string;
@@ -83,6 +94,7 @@ export type VoiceChat = {
   archivedAt: string | null;
   lastSummary: string | null;
   lastStatus: string | null;
+  lastTurnOutput: CodexTurnOutput | null;
 };
 
 export type VoiceProject = {

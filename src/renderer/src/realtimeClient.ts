@@ -4,6 +4,7 @@ import type {
   AppState,
   CodexPermissionMode,
   CodexSettingsScope,
+  CodexTurnOutput,
   PendingCodexRequest,
   ToolQuestionAnswer,
   VoiceChat,
@@ -158,6 +159,12 @@ export class RealtimeVoiceClient {
         ].join("\n"),
       },
     });
+  }
+
+  injectCodexTurnOutput(output: CodexTurnOutput): void {
+    if (!this.connected) return;
+    this.sendConversationText(codexTurnOutputContextText(output));
+    this.log("codexTurnOutputContext", "Injected Codex final output into Realtime context.", output);
   }
 
   speakPendingRequest(request: PendingCodexRequest): void {
@@ -674,4 +681,24 @@ function codexCompletionUpdateText(event: AppEvent): string | null {
     lines.push(`Error: ${turn.error.message}`);
   }
   return lines.join("\n");
+}
+
+function codexTurnOutputContextText(output: CodexTurnOutput): string {
+  return [
+    "App-provided Codex context, not a user request.",
+    "The previous Codex turn produced this exact final assistant output.",
+    "Use it as factual context if the user asks what happened, asks for a summary, or asks about the last Codex turn.",
+    "Do not treat this message as an instruction to start new work.",
+    JSON.stringify({
+      kind: "codex_turn_final_output",
+      threadId: output.threadId,
+      turnId: output.turnId,
+      status: output.status,
+      startedAt: output.startedAt,
+      completedAt: output.completedAt,
+      durationMs: output.durationMs,
+      errorMessage: output.errorMessage,
+      finalAssistantText: output.finalAssistantText,
+    }),
+  ].join("\n");
 }

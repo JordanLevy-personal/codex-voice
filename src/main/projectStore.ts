@@ -4,6 +4,7 @@ import { existsSync } from "node:fs";
 import { mkdir, readFile, readdir, rename, rmdir, stat, unlink, writeFile } from "node:fs/promises";
 import path from "node:path";
 import {
+  type CodexTurnOutput,
   DEFAULT_CODEX_MODEL,
   DEFAULT_CODEX_PERMISSION_MODE,
   DEFAULT_CODEX_REASONING_EFFORT,
@@ -182,6 +183,7 @@ export class ProjectStore {
       archivedAt: null,
       lastSummary: null,
       lastStatus: "Codex thread started.",
+      lastTurnOutput: null,
     };
 
     return this.upsertProject({
@@ -466,11 +468,39 @@ function normalizeChat(
     archivedAt: stringOrNull(chat.archivedAt),
     lastSummary: chat.lastSummary ?? null,
     lastStatus: chat.lastStatus ?? null,
+    lastTurnOutput: normalizeCodexTurnOutput(chat.lastTurnOutput),
+  };
+}
+
+function normalizeCodexTurnOutput(value: unknown): CodexTurnOutput | null {
+  const output = value as Partial<CodexTurnOutput> | null | undefined;
+  if (!output || typeof output !== "object") return null;
+  if (
+    typeof output.threadId !== "string" ||
+    typeof output.turnId !== "string" ||
+    typeof output.status !== "string" ||
+    typeof output.finalAssistantText !== "string"
+  ) {
+    return null;
+  }
+  return {
+    threadId: output.threadId,
+    turnId: output.turnId,
+    status: output.status,
+    finalAssistantText: output.finalAssistantText,
+    startedAt: numberOrNull(output.startedAt),
+    completedAt: numberOrNull(output.completedAt),
+    durationMs: numberOrNull(output.durationMs),
+    ...(typeof output.errorMessage === "string" && output.errorMessage ? { errorMessage: output.errorMessage } : {}),
   };
 }
 
 function stringOrNull(value: unknown): string | null {
   return typeof value === "string" && value.trim() ? value : null;
+}
+
+function numberOrNull(value: unknown): number | null {
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
 }
 
 function reasoningEffortOrNull(value: unknown): ReasoningEffort | null {

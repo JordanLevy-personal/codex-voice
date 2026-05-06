@@ -10,6 +10,7 @@ import {
   type CodexModelSummary,
   type CodexPermissionMode,
   type CodexThreadTokenUsage,
+  type CodexTurnOutput,
   type PendingCodexRequest,
   type PendingRequestQuestion,
   type ReasoningEffort,
@@ -121,6 +122,8 @@ function App(): React.ReactElement {
       setEvents((current) => [event, ...current].slice(0, 250));
       if (event.source === "codex" && event.kind === "serverRequest") {
         voiceRef.current?.speakPendingRequest(event.raw as PendingCodexRequest);
+      } else if (event.source === "codex" && event.kind === "turn/finalOutput") {
+        voiceRef.current?.injectCodexTurnOutput(event.raw as CodexTurnOutput);
       } else if (event.source === "codex" && event.kind === "turn/completed") {
         voiceRef.current?.notifyCodexTurnCompleted(event);
       } else if (event.source === "codex" && event.kind === "error") {

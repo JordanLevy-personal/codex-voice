@@ -13,6 +13,7 @@ import type {
   CodexSettingsScope,
   CodexSandboxMode,
   CodexThreadTokenUsage,
+  CodexTurnOutput,
   CodexRuntimeState,
   PendingRequestDetail,
   PendingRequestQuestion,
@@ -37,6 +38,28 @@ type TurnWaiter = {
   resolve: (text: string) => void;
   reject: (error: Error) => void;
   timeout: NodeJS.Timeout;
+};
+
+type ThreadReadResponse = {
+  thread?: {
+    turns?: CodexThreadTurn[];
+  };
+};
+
+type CodexThreadTurn = {
+  id?: string;
+  status?: string;
+  items?: CodexThreadItem[];
+  error?: { message?: string } | null;
+  startedAt?: number | null;
+  completedAt?: number | null;
+  durationMs?: number | null;
+};
+
+type CodexThreadItem = {
+  type?: string;
+  text?: string;
+  phase?: string | null;
 };
 
 type ChatContext = {
@@ -864,9 +887,12 @@ export class VoiceCodexOrchestrator extends EventEmitter {
           this.activeTurnByThread.delete(completedThreadId);
           this.activeTurnModelByThread.delete(completedThreadId);
           this.activeTurnReasoningEffortByThread.delete(completedThreadId);
-          this.updateChatForThread(completedThreadId, {
-            lastStatus: turn.status === "failed" ? "Codex turn failed." : "Codex finished.",
-          });
+          const lastStatus = turn.status === "failed" ? "Codex turn failed." : "Codex finished.";
+          if (turn.id) {
+            void this.captureCompletedTurnOutput(completedThreadId, turn.id, lastStatus);
+          } else {
+            this.updateChatForThread(completedThreadId, { lastStatus });
+          }
         }
       }
       if (turn.id) {
@@ -895,6 +921,79 @@ export class VoiceCodexOrchestrator extends EventEmitter {
       }, 180_000);
       this.turnWaiters.set(turnId, { text: "", resolve, reject, timeout });
     });
+  }
+
+  private async captureCompletedTurnOutput(threadId: string, turnId: string, lastStatus: string): Promise<void> {
+    try {
+      const response = (await this.codex.request("thread/read", {
+        threadId,
+        includeTurns: true,
+      })) as ThreadReadResponse;
+      const turn = response.thread?.turns?.find((candidate) => candidate.id === turnId);
+      if (!turn) {
+        await this.updateCompletedTurnStatus(threadId, lastStatus);
+        this.emitEvent("app", "turnOutputUnavailable", "Codex completed, but thread/read did not include the completed turn.", {
+          threadId,
+          turnId,
+        });
+        return;
+      }
+
+      const finalAssistantText = finalAssistantTextFromTurn(turn);
+      if (!finalAssistantText) {
+        await this.updateCompletedTurnStatus(threadId, lastStatus);
+        this.emitEvent("app", "turnOutputUnavailable", "Codex completed, but no final assistant output was available.", {
+          threadId,
+          turnId,
+          status: turn.status,
+        });
+        return;
+      }
+
+      const output: CodexTurnOutput = {
+        threadId,
+        turnId,
+        status: turn.status ?? "completed",
+        finalAssistantText,
+        startedAt: numberOrNull(turn.startedAt),
+        completedAt: numberOrNull(turn.completedAt),
+        durationMs: numberOrNull(turn.durationMs),
+        ...(turn.error?.message ? { errorMessage: turn.error.message } : {}),
+      };
+      const context = await this.findChatByThread(threadId);
+      if (context) {
+        await this.store.updateChat(context.project.id, context.chat.id, {
+          lastStatus,
+          lastTurnOutput: output,
+        });
+      }
+      this.emitEvent("codex", "turn/finalOutput", "Codex final output is available for voice context.", output);
+      this.emitState();
+    } catch (error) {
+      await this.updateCompletedTurnStatus(threadId, lastStatus);
+      this.emitEvent(
+        "app",
+        "turnOutputUnavailable",
+        error instanceof Error ? error.message : "Unable to read Codex final turn output.",
+        { threadId, turnId },
+      );
+    }
+  }
+
+  private async updateCompletedTurnStatus(threadId: string, lastStatus: string): Promise<void> {
+    try {
+      const context = await this.findChatByThread(threadId);
+      if (!context) return;
+      await this.store.updateChat(context.project.id, context.chat.id, { lastStatus });
+      this.emitState();
+    } catch (error) {
+      this.emitEvent(
+        "app",
+        "chatUpdateFailed",
+        error instanceof Error ? error.message : "Unable to update chat status.",
+        { threadId },
+      );
+    }
   }
 
   private runtimeState(activeProject: VoiceProject | null, projects: VoiceProject[]): CodexRuntimeState {
@@ -1421,6 +1520,22 @@ export class VoiceCodexOrchestrator extends EventEmitter {
       raw,
     } satisfies AppEvent);
   }
+}
+
+function finalAssistantTextFromTurn(turn: CodexThreadTurn): string | null {
+  const agentMessages = (turn.items ?? []).filter(
+    (item): item is CodexThreadItem & { text: string } =>
+      item.type === "agentMessage" && typeof item.text === "string" && item.text.trim().length > 0,
+  );
+  const finalMessage =
+    [...agentMessages].reverse().find((item) => item.phase === "final_answer") ??
+    agentMessages[agentMessages.length - 1] ??
+    null;
+  return finalMessage?.text ?? null;
+}
+
+function numberOrNull(value: unknown): number | null {
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
 }
 
 function describeServerRequest(message: CodexJsonMessage): PendingCodexRequest {
