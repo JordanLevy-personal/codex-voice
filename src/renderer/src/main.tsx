@@ -1,14 +1,17 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
-import type {
-  AppEvent,
-  AppState,
-  CodexThreadTokenUsage,
-  PendingCodexRequest,
-  ReasoningEffort,
-  ToolQuestionAnswer,
-  VoiceChat,
-  VoiceSession,
+import {
+  DEFAULT_CODEX_MODEL,
+  DEFAULT_CODEX_REASONING_EFFORT,
+  type AppEvent,
+  type AppState,
+  type CodexModelSummary,
+  type CodexThreadTokenUsage,
+  type PendingCodexRequest,
+  type ReasoningEffort,
+  type ToolQuestionAnswer,
+  type VoiceChat,
+  type VoiceSession,
 } from "../../shared/types";
 import { RealtimeVoiceClient } from "./realtimeClient";
 import "./styles.css";
@@ -31,14 +34,16 @@ const emptyState: AppState = {
     showSessionChats: false,
   },
   codexSettings: {
+    chatModel: null,
+    chatReasoningEffort: null,
     sessionModel: null,
     sessionReasoningEffort: null,
     nextTurnModel: null,
     nextTurnReasoningEffort: null,
     activeTurnModel: null,
     activeTurnReasoningEffort: null,
-    defaultModel: null,
-    defaultReasoningEffort: null,
+    defaultModel: DEFAULT_CODEX_MODEL,
+    defaultReasoningEffort: DEFAULT_CODEX_REASONING_EFFORT,
     models: [],
   },
   realtime: {
@@ -276,17 +281,18 @@ function VoiceHome({
   const archivedChats = useMemo(() => archivedChatsForSessions(state.sessions), [state.sessions]);
   const archivedCount = state.archivedSessions.length + archivedChats.length;
   const recentSessions = state.sessions.slice(0, 3);
-  const modelScope = activeSession ? "session" : "nextTurn";
+  const modelScope = activeSession ? "chat" : "nextTurn";
   const effectiveModel =
     state.codexSettings.nextTurnModel ??
-    state.codexSettings.sessionModel ??
+    state.codexSettings.chatModel ??
     state.codexSettings.defaultModel ??
-    "";
+    DEFAULT_CODEX_MODEL;
   const effectiveEffort =
     state.codexSettings.nextTurnReasoningEffort ??
-    state.codexSettings.sessionReasoningEffort ??
+    state.codexSettings.chatReasoningEffort ??
     state.codexSettings.defaultReasoningEffort ??
-    "xhigh";
+    DEFAULT_CODEX_REASONING_EFFORT;
+  const modelOptions = modelsForValue(state.codexSettings.models, effectiveModel);
   const filteredSessions = state.sessions.filter((session) => {
     const haystack = [
       session.displayName,
@@ -522,10 +528,10 @@ function VoiceHome({
                         )
                       }
                     >
-                      {state.codexSettings.models.length === 0 && (
+                      {modelOptions.length === 0 && (
                         <option value={effectiveModel}>{formatModelName(effectiveModel)}</option>
                       )}
-                      {state.codexSettings.models.map((model) => (
+                      {modelOptions.map((model) => (
                         <option key={model.id} value={model.model}>
                           {model.displayName || formatModelName(model.model)}
                         </option>
@@ -1134,14 +1140,14 @@ function DebugDashboard({
       ?.displayName ?? "none";
   const effectiveNextModel =
     state.codexSettings.nextTurnModel ??
-    state.codexSettings.sessionModel ??
+    state.codexSettings.chatModel ??
     state.codexSettings.defaultModel ??
-    "default";
+    DEFAULT_CODEX_MODEL;
   const effectiveNextEffort =
     state.codexSettings.nextTurnReasoningEffort ??
-    state.codexSettings.sessionReasoningEffort ??
+    state.codexSettings.chatReasoningEffort ??
     state.codexSettings.defaultReasoningEffort ??
-    "default";
+    DEFAULT_CODEX_REASONING_EFFORT;
 
   return (
     <main className="debug-shell app-shell">
@@ -1396,6 +1402,23 @@ function formatModelName(model: string | null): string {
   return model.replace(/^gpt-/i, "GPT-");
 }
 
+function modelsForValue(models: CodexModelSummary[], value: string | null): CodexModelSummary[] {
+  if (!value || models.some((model) => model.model === value)) return models;
+  return [
+    {
+      id: value,
+      model: value,
+      displayName: formatModelName(value),
+      description: "",
+      isDefault: false,
+      hidden: false,
+      defaultReasoningEffort: DEFAULT_CODEX_REASONING_EFFORT,
+      supportedReasoningEfforts: [],
+    },
+    ...models,
+  ];
+}
+
 function formatEffort(effort: string | null): string {
   if (!effort) return "Default";
   if (effort === "xhigh") return "Extra High";
@@ -1498,10 +1521,12 @@ function CodexSettingsPanel({
 }): React.ReactElement {
   const efforts: ReasoningEffort[] = ["none", "minimal", "low", "medium", "high", "xhigh"];
   const models = state.codexSettings.models;
-  const sessionModel = state.codexSettings.sessionModel ?? "";
+  const chatModel = state.codexSettings.chatModel ?? "";
   const nextTurnModel = state.codexSettings.nextTurnModel ?? "";
-  const sessionEffort = state.codexSettings.sessionReasoningEffort ?? "";
+  const chatEffort = state.codexSettings.chatReasoningEffort ?? "";
   const nextTurnEffort = state.codexSettings.nextTurnReasoningEffort ?? "";
+  const chatModelOptions = modelsForValue(models, chatModel);
+  const nextTurnModelOptions = modelsForValue(models, nextTurnModel);
 
   return (
     <section className="settings-panel">
@@ -1512,14 +1537,14 @@ function CodexSettingsPanel({
           effort={state.codexSettings.defaultReasoningEffort ?? "unknown"}
         />
         <SettingReadout
-          label="Session"
-          model={state.codexSettings.sessionModel ?? "default"}
-          effort={state.codexSettings.sessionReasoningEffort ?? "default"}
+          label="Chat"
+          model={state.codexSettings.chatModel ?? "default"}
+          effort={state.codexSettings.chatReasoningEffort ?? "default"}
         />
         <SettingReadout
           label="Next Turn"
-          model={state.codexSettings.nextTurnModel ?? "session/default"}
-          effort={state.codexSettings.nextTurnReasoningEffort ?? "session/default"}
+          model={state.codexSettings.nextTurnModel ?? "chat/default"}
+          effort={state.codexSettings.nextTurnReasoningEffort ?? "chat/default"}
         />
         <SettingReadout
           label="Active Turn"
@@ -1530,18 +1555,18 @@ function CodexSettingsPanel({
 
       <div className="settings-controls">
         <label>
-          Session model
+          Chat model
           <select
-            value={sessionModel}
+            value={chatModel}
             disabled={!state.activeSession}
             onChange={(event) =>
               void onAction(() =>
-                window.codexVoice.setCodexSettings({ model: event.target.value || null }, "session"),
+                window.codexVoice.setCodexSettings({ model: event.target.value || null }, "chat"),
               )
             }
           >
             <option value="">Default ({state.codexSettings.defaultModel ?? "unknown"})</option>
-            {models.map((model) => (
+            {chatModelOptions.map((model) => (
               <option key={model.id} value={model.model}>
                 {model.displayName} ({model.model})
               </option>
@@ -1550,15 +1575,15 @@ function CodexSettingsPanel({
         </label>
 
         <label>
-          Session effort
+          Chat effort
           <select
-            value={sessionEffort}
+            value={chatEffort}
             disabled={!state.activeSession}
             onChange={(event) =>
               void onAction(() =>
                 window.codexVoice.setCodexSettings(
                   { reasoningEffort: (event.target.value || null) as ReasoningEffort | null },
-                  "session",
+                  "chat",
                 ),
               )
             }
@@ -1582,8 +1607,8 @@ function CodexSettingsPanel({
               )
             }
           >
-            <option value="">Use session/default</option>
-            {models.map((model) => (
+            <option value="">Use chat/default</option>
+            {nextTurnModelOptions.map((model) => (
               <option key={model.id} value={model.model}>
                 {model.displayName} ({model.model})
               </option>
@@ -1604,7 +1629,7 @@ function CodexSettingsPanel({
               )
             }
           >
-            <option value="">Use session/default</option>
+            <option value="">Use chat/default</option>
             {efforts.map((effort) => (
               <option key={effort} value={effort}>
                 {effort}

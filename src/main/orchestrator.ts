@@ -16,6 +16,10 @@ import type {
   ToolQuestionAnswer,
   VoiceSession,
 } from "../shared/types";
+import {
+  DEFAULT_CODEX_MODEL,
+  DEFAULT_CODEX_REASONING_EFFORT,
+} from "../shared/types";
 import { CodexBridge, type CodexJsonMessage } from "./codexBridge";
 import { createRealtimeClientSecret, realtimeConfig } from "./realtime";
 import { SessionStore } from "./sessionStore";
@@ -44,8 +48,8 @@ export class VoiceCodexOrchestrator extends EventEmitter {
   private showSessionChatsFlag = false;
   private nextTurnModel: string | null = null;
   private nextTurnReasoningEffort: ReasoningEffort | null = null;
-  private defaultModel: string | null = null;
-  private defaultReasoningEffort: ReasoningEffort | null = null;
+  private defaultModel: string | null = DEFAULT_CODEX_MODEL;
+  private defaultReasoningEffort: ReasoningEffort | null = DEFAULT_CODEX_REASONING_EFFORT;
   private models: CodexModelSummary[] = [];
   private status = "Starting Codex app-server.";
   private pendingRequests = new Map<string, PendingCodexRequest>();
@@ -109,9 +113,10 @@ export class VoiceCodexOrchestrator extends EventEmitter {
 
   async createSession(name?: string): Promise<VoiceSession> {
     const session = await this.store.createSession(name);
+    const chatSettings = this.initialChatSettings(session);
     const result = (await this.codex.request("thread/start", {
       cwd: session.folderPath,
-      ...(session.model ? { model: session.model } : {}),
+      ...(chatSettings.model ? { model: chatSettings.model } : {}),
       approvalPolicy: "on-request",
       sandbox: "workspace-write",
       personality: "friendly",
@@ -123,7 +128,7 @@ export class VoiceCodexOrchestrator extends EventEmitter {
       throw new Error("Codex did not return a thread id.");
     }
 
-    const updated = await this.store.addChat(session.id, "Main task", codexThreadId);
+    const updated = await this.store.addChat(session.id, "Main task", codexThreadId, chatSettings);
     this.activeSessionId = updated.id;
     this.showSessionChatsFlag = false;
     this.status = `Active session: ${updated.displayName}`;
@@ -281,7 +286,7 @@ export class VoiceCodexOrchestrator extends EventEmitter {
     const { session, chat } = await this.resumeChatThread(context.session, context.chat);
     if (!chat.codexThreadId) throw new Error("Active chat is missing a Codex thread id.");
 
-    const turnSettings = this.resolveTurnSettings(session);
+    const turnSettings = this.resolveTurnSettings(session, chat);
     const result = (await this.codex.request("turn/start", {
       threadId: chat.codexThreadId,
       cwd: session.folderPath,
@@ -380,7 +385,7 @@ export class VoiceCodexOrchestrator extends EventEmitter {
     const resumedThreadId = resumed.chat.codexThreadId;
     if (!resumedThreadId) throw new Error("Session is missing a Codex chat thread id.");
 
-    const turnSettings = this.resolveTurnSettings(resumed.session);
+    const turnSettings = this.resolveTurnSettings(resumed.session, resumed.chat);
     const result = (await this.codex.request("turn/start", {
       threadId: resumedThreadId,
       cwd: resumed.session.folderPath,
@@ -488,17 +493,18 @@ export class VoiceCodexOrchestrator extends EventEmitter {
       return this.codexSettings(await this.getActiveSession());
     }
 
-    const session = await this.requireActiveSession();
-    const updated = await this.store.updateSession(session.id, {
+    const { session, chat } = await this.requireChatContext();
+    const updated = await this.store.updateChat(session.id, chat.id, {
       ...(settings.model !== undefined ? { model: settings.model } : {}),
       ...(settings.reasoningEffort !== undefined
         ? { reasoningEffort: settings.reasoningEffort }
         : {}),
       lastStatus: "Updated Codex model settings.",
     });
-    this.status = `Updated session Codex settings: ${this.describeModelEffort(
-      updated.model,
-      updated.reasoningEffort,
+    const updatedChat = updated.chats.find((candidate) => candidate.id === chat.id) ?? chat;
+    this.status = `Updated chat Codex settings: ${this.describeModelEffort(
+      updatedChat.model,
+      updatedChat.reasoningEffort,
     )}.`;
     this.emitEvent("app", "settingsChanged", this.status, updated);
     this.emitState();
@@ -566,6 +572,7 @@ export class VoiceCodexOrchestrator extends EventEmitter {
     if (!chat.codexThreadId) {
       throw new Error(`Chat "${chat.displayName}" does not have a Codex thread id.`);
     }
+    const chatSettings = this.threadSettingsForChat(session, chat);
 
     try {
       await this.codex.request("thread/resume", {
@@ -575,7 +582,7 @@ export class VoiceCodexOrchestrator extends EventEmitter {
         sandbox: "workspace-write",
         personality: "friendly",
         excludeTurns: true,
-        ...(session.model ? { model: session.model } : {}),
+        ...(chatSettings.model ? { model: chatSettings.model } : {}),
       });
       return { session, chat };
     } catch (error) {
@@ -584,7 +591,7 @@ export class VoiceCodexOrchestrator extends EventEmitter {
 
     const result = (await this.codex.request("thread/start", {
       cwd: session.folderPath,
-      ...(session.model ? { model: session.model } : {}),
+      ...(chatSettings.model ? { model: chatSettings.model } : {}),
       approvalPolicy: "on-request",
       sandbox: "workspace-write",
       personality: "friendly",
@@ -611,9 +618,10 @@ export class VoiceCodexOrchestrator extends EventEmitter {
   }
 
   private async startChatThread(session: VoiceSession, displayName: string): Promise<VoiceSession> {
+    const chatSettings = this.initialChatSettings(session);
     const result = (await this.codex.request("thread/start", {
       cwd: session.folderPath,
-      ...(session.model ? { model: session.model } : {}),
+      ...(chatSettings.model ? { model: chatSettings.model } : {}),
       approvalPolicy: "on-request",
       sandbox: "workspace-write",
       personality: "friendly",
@@ -623,7 +631,7 @@ export class VoiceCodexOrchestrator extends EventEmitter {
     const codexThreadId = result.thread?.id;
     if (!codexThreadId) throw new Error("Codex did not return a thread id.");
 
-    return this.store.addChat(session.id, displayName, codexThreadId);
+    return this.store.addChat(session.id, displayName, codexThreadId, chatSettings);
   }
 
   private handleServerRequest(message: CodexJsonMessage): void {
@@ -801,9 +809,8 @@ export class VoiceCodexOrchestrator extends EventEmitter {
         defaultReasoningEffort: model.defaultReasoningEffort,
         supportedReasoningEfforts: model.supportedReasoningEfforts ?? [],
       }));
-      const defaultModel = this.models.find((model) => model.isDefault) ?? this.models[0];
-      this.defaultModel = defaultModel?.model ?? null;
-      this.defaultReasoningEffort = defaultModel?.defaultReasoningEffort ?? null;
+      this.defaultModel = DEFAULT_CODEX_MODEL;
+      this.defaultReasoningEffort = DEFAULT_CODEX_REASONING_EFFORT;
     } catch (error) {
       this.emitEvent(
         "app",
@@ -814,10 +821,15 @@ export class VoiceCodexOrchestrator extends EventEmitter {
   }
 
   private codexSettings(activeSession: VoiceSession | null): CodexSettings {
-    const activeThreadId = activeSession ? activeChatForSession(activeSession)?.codexThreadId ?? null : null;
+    const activeChat = activeSession ? activeChatForSession(activeSession) : null;
+    const activeThreadId = activeChat?.codexThreadId ?? null;
+    const chatModel = activeChat?.model ?? activeSession?.model ?? null;
+    const chatReasoningEffort = activeChat?.reasoningEffort ?? activeSession?.reasoningEffort ?? null;
     return {
-      sessionModel: activeSession?.model ?? null,
-      sessionReasoningEffort: activeSession?.reasoningEffort ?? null,
+      chatModel,
+      chatReasoningEffort,
+      sessionModel: chatModel,
+      sessionReasoningEffort: chatReasoningEffort,
       nextTurnModel: this.nextTurnModel,
       nextTurnReasoningEffort: this.nextTurnReasoningEffort,
       activeTurnModel: activeThreadId ? this.activeTurnModelByThread.get(activeThreadId) ?? null : null,
@@ -830,19 +842,44 @@ export class VoiceCodexOrchestrator extends EventEmitter {
     };
   }
 
-  private resolveTurnSettings(session: VoiceSession): {
+  private resolveTurnSettings(session: VoiceSession, chat?: VoiceChat | null): {
     model: string | null;
     reasoningEffort: ReasoningEffort | null;
   } {
-    const model = this.nextTurnModel ?? session.model ?? this.defaultModel;
-    const modelInfo = model ? this.models.find((candidate) => candidate.model === model || candidate.id === model) : null;
+    const settings = this.threadSettingsForChat(session, chat ?? activeChatForSession(session));
     return {
-      model,
+      model: this.nextTurnModel ?? settings.model,
       reasoningEffort:
         this.nextTurnReasoningEffort ??
+        settings.reasoningEffort,
+    };
+  }
+
+  private initialChatSettings(session: VoiceSession): {
+    model: string | null;
+    reasoningEffort: ReasoningEffort | null;
+  } {
+    return {
+      model: session.model ?? this.defaultModel ?? DEFAULT_CODEX_MODEL,
+      reasoningEffort:
+        session.reasoningEffort ?? this.defaultReasoningEffort ?? DEFAULT_CODEX_REASONING_EFFORT,
+    };
+  }
+
+  private threadSettingsForChat(
+    session: VoiceSession,
+    chat?: VoiceChat | null,
+  ): {
+    model: string | null;
+    reasoningEffort: ReasoningEffort | null;
+  } {
+    return {
+      model: chat?.model ?? session.model ?? this.defaultModel ?? DEFAULT_CODEX_MODEL,
+      reasoningEffort:
+        chat?.reasoningEffort ??
         session.reasoningEffort ??
-        modelInfo?.defaultReasoningEffort ??
-        this.defaultReasoningEffort,
+        this.defaultReasoningEffort ??
+        DEFAULT_CODEX_REASONING_EFFORT,
     };
   }
 
@@ -919,7 +956,7 @@ export class VoiceCodexOrchestrator extends EventEmitter {
       );
     }
 
-    const parsed = parseModelSlashArgs(args, activeSession ? "session" : "nextTurn");
+    const parsed = parseModelSlashArgs(args, activeSession ? "chat" : "nextTurn");
     if (parsed.model !== undefined && parsed.model !== null) this.assertKnownModel(parsed.model);
     if (parsed.reasoningEffort !== undefined && parsed.reasoningEffort !== null) {
       this.assertReasoningEffort(parsed.reasoningEffort);
@@ -939,7 +976,7 @@ export class VoiceCodexOrchestrator extends EventEmitter {
     const { session, chat } = await this.requireChatContext();
     if (!chat.codexThreadId) throw new Error("Active chat is missing a Codex thread id.");
     const { target, delivery } = parseReviewSlashArgs(args);
-    const turnSettings = this.resolveTurnSettings(session);
+    const turnSettings = this.resolveTurnSettings(session, chat);
     const result = (await this.codex.request("review/start", {
       threadId: chat.codexThreadId,
       target,
@@ -1013,7 +1050,7 @@ export class VoiceCodexOrchestrator extends EventEmitter {
     const threadId = chat?.codexThreadId ?? null;
     const settings = this.codexSettings(session);
     const resolved = session
-      ? this.resolveTurnSettings(session)
+      ? this.resolveTurnSettings(session, chat)
       : {
           model: settings.nextTurnModel ?? settings.defaultModel,
           reasoningEffort: settings.nextTurnReasoningEffort ?? settings.defaultReasoningEffort,
@@ -1032,7 +1069,7 @@ export class VoiceCodexOrchestrator extends EventEmitter {
       `Runtime: ${this.threadStatusByThread.get(threadId ?? "") ?? this.status}`,
       `Active turn: ${threadId ? this.activeTurnByThread.get(threadId) ?? "none" : "none"}`,
       `Effective next turn: model ${resolved.model ?? "default"}, reasoning ${resolved.reasoningEffort ?? "default"}`,
-      `Session override: model ${settings.sessionModel ?? "default"}, reasoning ${settings.sessionReasoningEffort ?? "default"}`,
+      `Chat override: model ${settings.chatModel ?? "default"}, reasoning ${settings.chatReasoningEffort ?? "default"}`,
       `Active turn model: ${settings.activeTurnModel ?? "none"}, reasoning ${settings.activeTurnReasoningEffort ?? "none"}`,
       `Voice app defaults: approval on-request, sandbox workspace-write.`,
       `Context: ${formatTokenUsage(tokenUsage)}`,
@@ -1081,6 +1118,7 @@ export class VoiceCodexOrchestrator extends EventEmitter {
   }
 
   private assertKnownModel(model: string): void {
+    if (model === DEFAULT_CODEX_MODEL) return;
     if (this.models.length === 0) return;
     const found = this.models.some((candidate) => candidate.model === model || candidate.id === model);
     if (!found) {
@@ -1396,7 +1434,7 @@ function nativeSlashHelpText(): string {
   return [
     "Native Codex slash commands exposed in this debug app:",
     "/status - show thread, model/reasoning, context, and rate-limit state.",
-    "/model [session|next] [model|effort] [effort] - headless model picker; /model alone lists choices.",
+    "/model [chat|next] [model|effort] [effort] - headless model picker; session is accepted as a chat alias.",
     "/review [base <branch>|commit <sha>|custom <instructions>] [detached] - start app-server review.",
     "/compact - compact the active Codex thread context.",
     "/mcp [verbose] - list MCP servers reported by app-server.",
@@ -1517,11 +1555,11 @@ function parseReviewSlashArgs(args: string[]): { target: ReviewTarget; delivery?
 }
 
 function isScopeToken(value: string | undefined): value is string {
-  return value === "session" || value === "next" || value === "nextturn" || value === "next-turn";
+  return value === "chat" || value === "session" || value === "next" || value === "nextturn" || value === "next-turn";
 }
 
 function scopeFromToken(value: string): CodexSettingsScope {
-  return value === "session" ? "session" : "nextTurn";
+  return value === "next" || value === "nextturn" || value === "next-turn" ? "nextTurn" : "chat";
 }
 
 function isResetToken(value: string): boolean {
@@ -1656,15 +1694,15 @@ function formatPlugins(
 
 function settingsText(settings: CodexSettings): string {
   const effectiveNextModel =
-    settings.nextTurnModel ?? settings.sessionModel ?? settings.defaultModel ?? "default";
+    settings.nextTurnModel ?? settings.chatModel ?? settings.defaultModel ?? "default";
   const effectiveNextEffort =
     settings.nextTurnReasoningEffort ??
-    settings.sessionReasoningEffort ??
+    settings.chatReasoningEffort ??
     settings.defaultReasoningEffort ??
     "default";
   return [
-    `Current session default: model ${settings.sessionModel ?? settings.defaultModel ?? "default"}, reasoning ${
-      settings.sessionReasoningEffort ?? settings.defaultReasoningEffort ?? "default"
+    `Current chat default: model ${settings.chatModel ?? settings.defaultModel ?? "default"}, reasoning ${
+      settings.chatReasoningEffort ?? settings.defaultReasoningEffort ?? "default"
     }.`,
     `Next turn: model ${effectiveNextModel}, reasoning ${effectiveNextEffort}.`,
     `Active turn: model ${settings.activeTurnModel ?? "none"}, reasoning ${

@@ -1,4 +1,12 @@
-import type { AppEvent, ApprovalDecision, AppState, PendingCodexRequest, ToolQuestionAnswer, VoiceChat } from "../../shared/types";
+import type {
+  AppEvent,
+  ApprovalDecision,
+  AppState,
+  CodexSettingsScope,
+  PendingCodexRequest,
+  ToolQuestionAnswer,
+  VoiceChat,
+} from "../../shared/types";
 
 type RealtimeCallbacks = {
   onLog: (event: AppEvent) => void;
@@ -429,8 +437,8 @@ function visibleChats(chats: VoiceChat[]): VoiceChat[] {
   return chats.filter((chat) => !chat.archivedAt);
 }
 
-function scopeArg(value: unknown): "session" | "nextTurn" {
-  return value === "nextTurn" ? "nextTurn" : "session";
+function scopeArg(value: unknown): CodexSettingsScope {
+  return value === "nextTurn" ? "nextTurn" : "chat";
 }
 
 function reasoningEffortArg(value: unknown): "none" | "minimal" | "low" | "medium" | "high" | "xhigh" {

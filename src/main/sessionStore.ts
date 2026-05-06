@@ -3,7 +3,13 @@ import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
 import { mkdir, readFile, readdir, writeFile } from "node:fs/promises";
 import path from "node:path";
-import type { ReasoningEffort, VoiceChat, VoiceSession } from "../shared/types";
+import {
+  DEFAULT_CODEX_MODEL,
+  DEFAULT_CODEX_REASONING_EFFORT,
+  type ReasoningEffort,
+  type VoiceChat,
+  type VoiceSession,
+} from "../shared/types";
 
 type SessionIndex = {
   version: 1;
@@ -131,19 +137,27 @@ export class SessionStore {
     });
   }
 
-  async addChat(sessionId: string, displayName: string, codexThreadId: string): Promise<VoiceSession> {
+  async addChat(
+    sessionId: string,
+    displayName: string,
+    codexThreadId: string,
+    settings: { model?: string | null; reasoningEffort?: ReasoningEffort | null } = {},
+  ): Promise<VoiceSession> {
     const existing = await this.getSession(sessionId);
     if (!existing) {
       throw new Error(`Unknown voice session: ${sessionId}`);
     }
 
     const now = new Date().toISOString();
+    const model = settings.model ?? existing.model ?? DEFAULT_CODEX_MODEL;
+    const reasoningEffort =
+      settings.reasoningEffort ?? existing.reasoningEffort ?? DEFAULT_CODEX_REASONING_EFFORT;
     const chat: VoiceChat = {
       id: randomUUID(),
       displayName: displayName.trim() || "New chat",
       codexThreadId,
-      model: null,
-      reasoningEffort: null,
+      model,
+      reasoningEffort,
       createdAt: now,
       updatedAt: now,
       archivedAt: null,
@@ -315,8 +329,13 @@ function normalizeSession(value: unknown): VoiceSession {
   const createdAt = stringOrNow(session.createdAt);
   const updatedAt = stringOrNow(session.updatedAt);
   const legacyThreadId = stringOrNull(session.codexThreadId);
+  const legacyModel = stringOrNull(session.model) ?? DEFAULT_CODEX_MODEL;
+  const legacyReasoningEffort =
+    reasoningEffortOrNull(session.reasoningEffort) ?? DEFAULT_CODEX_REASONING_EFFORT;
   let chats = Array.isArray(session.chats)
-    ? session.chats.map((chat) => normalizeChat(chat, createdAt, updatedAt)).filter((chat) => chat.id)
+    ? session.chats
+        .map((chat) => normalizeChat(chat, createdAt, updatedAt, legacyModel, legacyReasoningEffort))
+        .filter((chat) => chat.id)
     : [];
 
   if (chats.length === 0 && legacyThreadId) {
@@ -325,8 +344,8 @@ function normalizeSession(value: unknown): VoiceSession {
         id: `${session.id}-main`,
         displayName: "Main task",
         codexThreadId: legacyThreadId,
-        model: null,
-        reasoningEffort: null,
+        model: legacyModel,
+        reasoningEffort: legacyReasoningEffort,
         createdAt,
         updatedAt,
         archivedAt: null,
@@ -351,19 +370,25 @@ function normalizeSession(value: unknown): VoiceSession {
     activeChatId,
     chats,
     codexThreadId: activeChat?.codexThreadId ?? null,
-    model: session.model ?? null,
-    reasoningEffort: session.reasoningEffort ?? null,
+    model: stringOrNull(session.model),
+    reasoningEffort: reasoningEffortOrNull(session.reasoningEffort),
   };
 }
 
-function normalizeChat(value: unknown, fallbackCreatedAt: string, fallbackUpdatedAt: string): VoiceChat {
+function normalizeChat(
+  value: unknown,
+  fallbackCreatedAt: string,
+  fallbackUpdatedAt: string,
+  fallbackModel: string,
+  fallbackReasoningEffort: ReasoningEffort,
+): VoiceChat {
   const chat = value as VoiceChat & { reasoningEffort?: ReasoningEffort | null };
   return {
     id: String(chat.id ?? randomUUID()),
     displayName: String(chat.displayName ?? "Main task"),
     codexThreadId: stringOrNull(chat.codexThreadId),
-    model: chat.model ?? null,
-    reasoningEffort: chat.reasoningEffort ?? null,
+    model: stringOrNull(chat.model) ?? fallbackModel,
+    reasoningEffort: reasoningEffortOrNull(chat.reasoningEffort) ?? fallbackReasoningEffort,
     createdAt: stringOrNow(chat.createdAt, fallbackCreatedAt),
     updatedAt: stringOrNow(chat.updatedAt, fallbackUpdatedAt),
     archivedAt: stringOrNull(chat.archivedAt),
@@ -374,6 +399,12 @@ function normalizeChat(value: unknown, fallbackCreatedAt: string, fallbackUpdate
 
 function stringOrNull(value: unknown): string | null {
   return typeof value === "string" && value.trim() ? value : null;
+}
+
+function reasoningEffortOrNull(value: unknown): ReasoningEffort | null {
+  return typeof value === "string" && ["none", "minimal", "low", "medium", "high", "xhigh"].includes(value)
+    ? (value as ReasoningEffort)
+    : null;
 }
 
 function stringOrNow(value: unknown, fallback = new Date().toISOString()): string {

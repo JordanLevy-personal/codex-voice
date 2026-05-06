@@ -117,7 +117,7 @@ function realtimeInstructions(): string {
     "- When asked for status, use get_codex_status instead of guessing.",
     "- When asked for chat-specific status or updates, use get_codex_chat_status.",
     "- When asked which Codex model or reasoning effort is in use, use get_codex_status.",
-    "- When asked to change Codex model or reasoning effort, use set_codex_model or set_codex_reasoning_effort.",
+    "- When asked to change Codex model or reasoning effort, use set_codex_model or set_codex_reasoning_effort for the current chat unless the user says next turn only.",
   ].join("\n");
 }
 
@@ -241,15 +241,15 @@ function realtimeTools(): unknown[] {
     {
       type: "function",
       name: "set_codex_model",
-      description: "Set the Codex model for the current session or next turn only.",
+      description: "Set the Codex model for the current chat or next turn only.",
       parameters: {
         type: "object",
         properties: {
           model: { type: "string" },
           scope: {
             type: "string",
-            enum: ["session", "nextTurn"],
-            description: "Use session unless the user says this is only for the next request/turn.",
+            enum: ["chat", "session", "nextTurn"],
+            description: "Use chat unless the user says this is only for the next request/turn. Session is a legacy alias for chat.",
           },
         },
         required: ["model", "scope"],
@@ -258,7 +258,7 @@ function realtimeTools(): unknown[] {
     {
       type: "function",
       name: "set_codex_reasoning_effort",
-      description: "Set the Codex reasoning effort for the current session or next turn only.",
+      description: "Set the Codex reasoning effort for the current chat or next turn only.",
       parameters: {
         type: "object",
         properties: {
@@ -268,8 +268,8 @@ function realtimeTools(): unknown[] {
           },
           scope: {
             type: "string",
-            enum: ["session", "nextTurn"],
-            description: "Use session unless the user says this is only for the next request/turn.",
+            enum: ["chat", "session", "nextTurn"],
+            description: "Use chat unless the user says this is only for the next request/turn. Session is a legacy alias for chat.",
           },
         },
         required: ["reasoningEffort", "scope"],

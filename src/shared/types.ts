@@ -1,5 +1,8 @@
 export type ReasoningEffort = "none" | "minimal" | "low" | "medium" | "high" | "xhigh";
 
+export const DEFAULT_CODEX_MODEL = "gpt-5.5";
+export const DEFAULT_CODEX_REASONING_EFFORT: ReasoningEffort = "medium";
+
 export type CodexModelSummary = {
   id: string;
   model: string;
@@ -14,9 +17,12 @@ export type CodexModelSummary = {
   }>;
 };
 
-export type CodexSettingsScope = "session" | "nextTurn";
+export type CodexSettingsScope = "chat" | "session" | "nextTurn";
 
 export type CodexSettings = {
+  chatModel: string | null;
+  chatReasoningEffort: ReasoningEffort | null;
+  /** Compatibility aliases for older renderer/voice callers. */
   sessionModel: string | null;
   sessionReasoningEffort: ReasoningEffort | null;
   nextTurnModel: string | null;
