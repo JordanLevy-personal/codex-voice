@@ -7,6 +7,7 @@ import {
   DEFAULT_CODEX_REASONING_EFFORT,
   DEFAULT_REALTIME_MODEL,
   DEFAULT_REALTIME_VOICE,
+  REALTIME_MODELS,
   type AppEvent,
   type AppState,
   type CodexModelSummary,
@@ -16,6 +17,7 @@ import {
   type PendingCodexRequest,
   type PendingRequestQuestion,
   type ReasoningEffort,
+  type RealtimeModel,
   type ToolQuestionAnswer,
   type VoiceChat,
   type VoiceProject,
@@ -58,6 +60,7 @@ const emptyState: AppState = {
   realtime: {
     available: false,
     model: DEFAULT_REALTIME_MODEL,
+    modelSource: "default",
     voice: DEFAULT_REALTIME_VOICE,
     reasoningEffort: null,
     reason: null,
@@ -126,9 +129,7 @@ function App(): React.ReactElement {
       if (event.source === "codex" && event.kind === "serverRequest") {
         voiceRef.current?.speakPendingRequest(event.raw as PendingCodexRequest);
       } else if (event.source === "codex" && event.kind === "turn/finalOutput") {
-        voiceRef.current?.injectCodexTurnOutput(event.raw as CodexTurnOutput);
-      } else if (event.source === "codex" && event.kind === "turn/completed") {
-        voiceRef.current?.notifyCodexTurnCompleted(event);
+        voiceRef.current?.summarizeCodexTurnOutput(event.raw as CodexTurnOutput);
       } else if (event.source === "codex" && event.kind === "error") {
         voiceRef.current?.speakStatus(event.message);
       }
@@ -167,14 +168,18 @@ function App(): React.ReactElement {
     }
   }
 
+  function disconnectVoice(status = "Realtime disconnected."): void {
+    voiceRef.current?.disconnect();
+    voiceRef.current = null;
+    setVoiceConnected(false);
+    setVoiceConnecting(false);
+    setVoicePaused(false);
+    setVoiceStatus(status);
+  }
+
   async function toggleVoice(): Promise<void> {
     if (voiceRef.current?.connected || voiceConnected) {
-      voiceRef.current?.disconnect();
-      voiceRef.current = null;
-      setVoiceConnected(false);
-      setVoiceConnecting(false);
-      setVoicePaused(false);
-      setVoiceStatus("Realtime disconnected.");
+      disconnectVoice();
       return;
     }
     if (voiceConnecting) return;
@@ -260,6 +265,7 @@ function App(): React.ReactElement {
       onOrbAction={handleOrbAction}
       onRefresh={refreshState}
       onShowDebug={openDebugWindow}
+      onDisconnectVoice={disconnectVoice}
       onToggleVoice={toggleVoice}
     />
   );
@@ -276,6 +282,7 @@ function VoiceHome({
   onOrbAction,
   onRefresh,
   onShowDebug,
+  onDisconnectVoice,
   onToggleVoice,
 }: {
   state: AppState;
@@ -288,6 +295,7 @@ function VoiceHome({
   onOrbAction: () => Promise<void>;
   onRefresh: () => Promise<void>;
   onShowDebug: () => Promise<void>;
+  onDisconnectVoice: (status?: string) => void;
   onToggleVoice: () => Promise<void>;
 }): React.ReactElement {
   const [menuOpen, setMenuOpen] = useState(false);
@@ -329,6 +337,7 @@ function VoiceHome({
     state.codexSettings.chatReasoningEffort ??
     state.codexSettings.defaultReasoningEffort ??
     DEFAULT_CODEX_REASONING_EFFORT;
+  const fastModeEnabled = effectiveEffort === "low";
   const effectivePermissionMode =
     state.codexSettings.nextTurnPermissionMode ??
     state.codexSettings.chatPermissionMode ??
@@ -338,6 +347,8 @@ function VoiceHome({
   const modelOptions = modelsForValue(state.codexSettings.models, effectiveModel);
   const pendingRequests = state.runtime.pendingRequests;
   const primaryPendingRequest = pendingRequests[0] ?? null;
+  const realtimeModel = realtimeModelForUi(state.realtime.model);
+  const realtimeModelLocked = state.realtime.modelSource === "environment";
   const filteredProjects = projects.filter((project) => {
     const haystack = [
       project.displayName,
@@ -351,6 +362,19 @@ function VoiceHome({
   });
   const voiceState = voiceStateLabel(state, voiceConnected, voiceConnecting, voicePaused);
   const voiceOrbLabel = voiceOrbAriaLabel(state, voiceConnected, voiceConnecting, voicePaused);
+
+  async function setRealtimeModel(model: RealtimeModel): Promise<void> {
+    await onAction(() => window.codexVoice.setRealtimeModel(model));
+    if (voiceConnected || voiceConnecting) {
+      onDisconnectVoice("Realtime disconnected. Reconnect to use the selected voice model.");
+    }
+  }
+
+  async function setFastMode(enabled: boolean): Promise<void> {
+    await onAction(() =>
+      window.codexVoice.setCodexSettings({ reasoningEffort: enabled ? "low" : null }, modelScope),
+    );
+  }
 
   useEffect(() => {
     setChatsOpen(false);
@@ -547,6 +571,20 @@ function VoiceHome({
 
         <div className="voice-home-scroll">
           <section className="voice-model-picker" aria-label="Model settings">
+            <div className="voice-realtime-toggle" role="group" aria-label="Realtime voice model">
+              {REALTIME_MODELS.map((model) => (
+                <button
+                  key={model}
+                  className={model === realtimeModel ? "selected" : ""}
+                  disabled={realtimeModelLocked}
+                  title={realtimeModelLocked ? "OPENAI_REALTIME_MODEL is set in the launch environment." : model}
+                  onClick={() => void setRealtimeModel(model)}
+                >
+                  {formatRealtimeModelLabel(model)}
+                </button>
+              ))}
+            </div>
+
             <button
               className="voice-model-trigger"
               aria-expanded={modelOpen}
@@ -607,6 +645,25 @@ function VoiceHome({
               </div>
             )}
 
+            <div className="voice-fast-mode-toggle" role="group" aria-label="Fast mode toggle">
+              <span>Fast mode</span>
+              <div>
+                <button
+                  className={!fastModeEnabled ? "selected" : ""}
+                  aria-pressed={!fastModeEnabled}
+                  onClick={() => void setFastMode(false)}
+                >
+                  Off
+                </button>
+                <button
+                  className={fastModeEnabled ? "selected" : ""}
+                  aria-pressed={fastModeEnabled}
+                  onClick={() => void setFastMode(true)}
+                >
+                  On
+                </button>
+              </div>
+            </div>
           </section>
 
           <section className="voice-hero" aria-label="Voice status">
@@ -1513,6 +1570,16 @@ function formatProjectTime(iso: string): string {
 function formatModelName(model: string | null): string {
   if (!model) return "Default";
   return model.replace(/^gpt-/i, "GPT-");
+}
+
+function realtimeModelForUi(model: string): RealtimeModel {
+  if (model === "gpt-realtime-1.5") return "gpt-realtime-1.5";
+  if (model === "gpt-realtime-2" || model.startsWith("gpt-realtime-2-")) return "gpt-realtime-2";
+  return DEFAULT_REALTIME_MODEL;
+}
+
+function formatRealtimeModelLabel(model: RealtimeModel): string {
+  return model === "gpt-realtime-2" ? "Realtime 2" : "Realtime 1.5";
 }
 
 function modelsForValue(models: CodexModelSummary[], value: string | null): CodexModelSummary[] {

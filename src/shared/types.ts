@@ -2,6 +2,7 @@ export type ReasoningEffort = "none" | "minimal" | "low" | "medium" | "high" | "
 export type CodexApprovalPolicy = "untrusted" | "on-failure" | "on-request" | "never";
 export type CodexSandboxMode = "read-only" | "workspace-write" | "danger-full-access";
 export type CodexPermissionMode = "default" | "auto-review" | "full-access";
+export type RealtimeModel = "gpt-realtime-1.5" | "gpt-realtime-2";
 
 export type CodexPermissionProfile = {
   mode: CodexPermissionMode;
@@ -17,6 +18,7 @@ export const DEFAULT_CODEX_PERMISSION_MODE: CodexPermissionMode = "default";
 export const DEFAULT_REALTIME_MODEL = "gpt-realtime-2";
 export const DEFAULT_REALTIME_VOICE = "marin";
 export const DEFAULT_REALTIME_REASONING_EFFORT = "low";
+export const REALTIME_MODELS: RealtimeModel[] = ["gpt-realtime-1.5", "gpt-realtime-2"];
 
 export const CODEX_PERMISSION_PROFILES: CodexPermissionProfile[] = [
   {
@@ -215,6 +217,7 @@ export type AppState = {
   realtime: {
     available: boolean;
     model: string;
+    modelSource: "environment" | "saved" | "default";
     voice: string;
     reasoningEffort: string | null;
     reason: string | null;
@@ -283,6 +286,7 @@ export type CodexVoiceApi = {
   answerToolQuestion(requestId: string | number, answers: ToolQuestionAnswer[]): Promise<void>;
   saveOpenAiApiKey(apiKey: string): Promise<void>;
   clearOpenAiApiKey(): Promise<void>;
+  setRealtimeModel(model: RealtimeModel): Promise<AppState>;
   createRealtimeClientSecret(): Promise<RealtimeClientSecret>;
   onAppState(listener: (state: AppState) => void): () => void;
   onAppEvent(listener: (event: AppEvent) => void): () => void;

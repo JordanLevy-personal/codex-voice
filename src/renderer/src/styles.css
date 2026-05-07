@@ -280,16 +280,99 @@ code {
   z-index: 18;
   display: flex;
   width: 100%;
-  align-items: flex-start;
-  justify-content: flex-end;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 10px;
   margin-top: 14px;
   -webkit-app-region: no-drag;
 }
 
+.voice-realtime-toggle {
+  display: inline-grid;
+  flex: 0 0 196px;
+  height: 36px;
+  grid-template-columns: 1fr 1fr;
+  gap: 3px;
+  border: 1px solid rgba(255, 255, 255, 0.09);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.035);
+  padding: 3px;
+}
+
+.voice-realtime-toggle button {
+  min-width: 0;
+  border-radius: 999px;
+  color: rgba(198, 204, 214, 0.72);
+  font-size: 12px;
+  font-weight: 620;
+  line-height: 1;
+  padding: 0 8px;
+  white-space: nowrap;
+}
+
+.voice-realtime-toggle button.selected {
+  background: rgba(255, 255, 255, 0.12);
+  color: rgba(244, 247, 252, 0.94);
+}
+
+.voice-realtime-toggle button:disabled {
+  cursor: not-allowed;
+  opacity: 0.58;
+}
+
+.voice-fast-mode-toggle {
+  display: flex;
+  flex: 0 0 100%;
+  min-height: 34px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  border: 1px solid rgba(255, 255, 255, 0.09);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.032);
+  padding: 3px 4px 3px 12px;
+}
+
+.voice-fast-mode-toggle > span {
+  min-width: 0;
+  color: rgba(244, 247, 252, 0.86);
+  font-size: 13px;
+  font-weight: 650;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.voice-fast-mode-toggle > div {
+  display: inline-grid;
+  flex: 0 0 108px;
+  height: 28px;
+  grid-template-columns: 1fr 1fr;
+  gap: 3px;
+}
+
+.voice-fast-mode-toggle button {
+  min-width: 0;
+  border-radius: 999px;
+  color: rgba(198, 204, 214, 0.72);
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1;
+  padding: 0 8px;
+}
+
+.voice-fast-mode-toggle button.selected {
+  background: rgba(255, 255, 255, 0.12);
+  color: rgba(244, 247, 252, 0.94);
+}
+
 .voice-model-trigger {
   display: inline-flex;
+  flex: 1 1 0;
   width: auto;
-  max-width: min(100%, 278px);
+  max-width: 220px;
+  min-width: 0;
   min-height: 36px;
   align-items: center;
   justify-content: center;

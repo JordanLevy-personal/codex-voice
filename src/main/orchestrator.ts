@@ -20,6 +20,7 @@ import type {
   PendingRequestQuestionOption,
   PendingCodexRequest,
   ReasoningEffort,
+  RealtimeModel,
   ToolQuestionAnswer,
   VoiceProject,
 } from "../shared/types";
@@ -31,6 +32,7 @@ import {
 } from "../shared/types";
 import { CodexBridge, type CodexJsonMessage } from "./codexBridge";
 import { createRealtimeClientSecret, realtimeConfig } from "./realtime";
+import { saveRealtimeModel } from "./realtimeSettingsStore";
 import { ProjectStore } from "./projectStore";
 
 type TurnWaiter = {
@@ -121,6 +123,13 @@ export class VoiceCodexOrchestrator extends EventEmitter {
 
   shutdown(): void {
     this.codex.stop();
+  }
+
+  async setRealtimeModel(model: RealtimeModel): Promise<AppState> {
+    saveRealtimeModel(model);
+    this.emitEvent("app", "realtimeModelUpdated", `Realtime model set to ${model}.`, realtimeConfig());
+    this.emitState();
+    return this.state();
   }
 
   async state(): Promise<AppState> {

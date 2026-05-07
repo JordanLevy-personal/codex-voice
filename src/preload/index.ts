@@ -7,6 +7,7 @@ import type {
   CodexSettingsScope,
   CodexVoiceApi,
   ReasoningEffort,
+  RealtimeModel,
   ToolQuestionAnswer,
 } from "../shared/types";
 
@@ -46,6 +47,7 @@ const api: CodexVoiceApi = {
     ipcRenderer.invoke("codex:answerToolQuestion", { requestId, answers }),
   saveOpenAiApiKey: (apiKey: string) => ipcRenderer.invoke("settings:saveOpenAiApiKey", { apiKey }),
   clearOpenAiApiKey: () => ipcRenderer.invoke("settings:clearOpenAiApiKey"),
+  setRealtimeModel: (model: RealtimeModel) => ipcRenderer.invoke("settings:setRealtimeModel", { model }),
   createRealtimeClientSecret: () => ipcRenderer.invoke("realtime:createClientSecret"),
   onAppState: (listener: (state: AppState) => void) => {
     const handler = (_event: Electron.IpcRendererEvent, state: AppState) => listener(state);

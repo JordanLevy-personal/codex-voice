@@ -162,10 +162,24 @@ export class RealtimeVoiceClient {
     });
   }
 
-  injectCodexTurnOutput(output: CodexTurnOutput): void {
+  summarizeCodexTurnOutput(output: CodexTurnOutput): void {
     if (!this.connected) return;
     this.sendConversationText(codexTurnOutputContextText(output));
     this.log("codexTurnOutputContext", "Injected Codex final output into Realtime context.", output);
+    if (this.paused || !output.finalAssistantText?.trim()) return;
+
+    this.send({
+      type: "response.create",
+      response: {
+        output_modalities: ["audio"],
+        instructions: [
+          "Summarize the completed Codex work for the user.",
+          "Use the app-provided final assistant output already in the conversation.",
+          "Speak naturally in one or two short sentences.",
+          "Do not call tools.",
+        ].join("\n"),
+      },
+    });
   }
 
   speakPendingRequest(request: PendingCodexRequest): void {

@@ -11,6 +11,7 @@ import type {
   CodexPermissionMode,
   CodexSettingsScope,
   ReasoningEffort,
+  RealtimeModel,
   ToolQuestionAnswer,
 } from "../shared/types";
 
@@ -273,6 +274,9 @@ function registerIpc(): void {
   registerIpcHandler("settings:clearOpenAiApiKey", () => {
     clearOpenAiApiKey();
   });
+  registerIpcHandler("settings:setRealtimeModel", (_event, payload: { model: RealtimeModel }) =>
+    requireOrchestrator().setRealtimeModel(payload.model),
+  );
   registerIpcHandler("realtime:createClientSecret", () =>
     requireOrchestrator().createRealtimeClientSecret(),
   );

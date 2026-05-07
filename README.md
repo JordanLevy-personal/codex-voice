@@ -52,6 +52,10 @@ export OPENAI_REALTIME_REASONING_EFFORT=low
 `OPENAI_REALTIME_REASONING_EFFORT` applies to `gpt-realtime-2` sessions and
 accepts `minimal`, `low`, `medium`, or `high`.
 
+The voice window also includes a Realtime model toggle for switching between
+`gpt-realtime-1.5` and `gpt-realtime-2`. `OPENAI_REALTIME_MODEL` overrides the
+in-app toggle when set.
+
 ## Development
 
 Run the app in development mode:

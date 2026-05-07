@@ -1,6 +1,7 @@
 import type { RealtimeClientSecret } from "../shared/types";
 import { DEFAULT_REALTIME_MODEL, DEFAULT_REALTIME_REASONING_EFFORT, DEFAULT_REALTIME_VOICE } from "../shared/types";
 import { getOpenAiApiKey, getOpenAiApiKeyStatus } from "./apiKeyStore";
+import { getSavedRealtimeModel } from "./realtimeSettingsStore";
 
 const REALTIME_ENDPOINT = "https://api.openai.com/v1/realtime/client_secrets";
 const REALTIME_REASONING_EFFORTS = new Set(["minimal", "low", "medium", "high"]);
@@ -8,13 +9,16 @@ const REALTIME_REASONING_EFFORTS = new Set(["minimal", "low", "medium", "high"])
 export function realtimeConfig(): {
   available: boolean;
   model: string;
+  modelSource: "environment" | "saved" | "default";
   voice: string;
   reasoningEffort: string | null;
   reason: string | null;
   apiKeySource: "environment" | "saved" | null;
   apiKeyEncrypted: boolean;
 } {
-  const model = process.env.OPENAI_REALTIME_MODEL || DEFAULT_REALTIME_MODEL;
+  const savedModel = getSavedRealtimeModel();
+  const model = process.env.OPENAI_REALTIME_MODEL || savedModel || DEFAULT_REALTIME_MODEL;
+  const modelSource = process.env.OPENAI_REALTIME_MODEL ? "environment" : savedModel ? "saved" : "default";
   const voice = process.env.OPENAI_REALTIME_VOICE || DEFAULT_REALTIME_VOICE;
   const reasoningEffort = realtimeReasoningEffort(model);
   const status = getOpenAiApiKeyStatus();
@@ -22,6 +26,7 @@ export function realtimeConfig(): {
   return {
     available,
     model,
+    modelSource,
     voice,
     reasoningEffort,
     reason: available
