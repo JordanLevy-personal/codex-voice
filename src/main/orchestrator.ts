@@ -7,6 +7,7 @@ import type {
   CodexActionResult,
   CodexChatRuntime,
   CodexModelSummary,
+  CodexOpenChatResult,
   CodexPermissionMode,
   VoiceChat,
   CodexSettings,
@@ -31,6 +32,7 @@ import {
   DEFAULT_CODEX_REASONING_EFFORT,
 } from "../shared/types";
 import { CodexBridge, type CodexJsonMessage } from "./codexBridge";
+import { isCodexDesktopProjectFolder } from "./codexDesktopState";
 import { createRealtimeClientSecret, realtimeConfig } from "./realtime";
 import { saveRealtimeModel } from "./realtimeSettingsStore";
 import { ProjectStore } from "./projectStore";
@@ -164,6 +166,16 @@ export class VoiceCodexOrchestrator extends EventEmitter {
     return project;
   }
 
+  async openProjectFolder(folderPath: string, name?: string): Promise<VoiceProject> {
+    const project = await this.store.openProjectFolder(folderPath, name);
+    this.activeProjectId = project.id;
+    this.showProjectChatsFlag = false;
+    this.status = `Active project: ${project.displayName}`;
+    this.emitEvent("app", "projectFolderOpened", `Opened project folder "${project.displayName}".`, project);
+    this.emitState();
+    return project;
+  }
+
   async resumeProject(projectId: string): Promise<VoiceProject> {
     let project = await this.store.getProject(projectId);
     if (!project) throw new Error(`Unknown project: ${projectId}`);
@@ -275,6 +287,45 @@ export class VoiceCodexOrchestrator extends EventEmitter {
     this.emitEvent("app", "chatRestored", this.status, { projectId: project.id, chatId: chat.id });
     this.emitState();
     return updated;
+  }
+
+  async openChatInCodex(chatId?: string, projectId?: string): Promise<CodexOpenChatResult> {
+    const { project, chat } = chatId
+      ? await this.requireChatContext(chatId)
+      : await this.requireChatContextForProject(projectId);
+    const threadId = chat.codexThreadId;
+    const projectKnownToCodex = isCodexDesktopProjectFolder(project.folderPath);
+    const existingThreadId = projectKnownToCodex ? threadId : null;
+    const mode = existingThreadId ? "existing-thread" : "new-project";
+    const params = new URLSearchParams({ path: project.folderPath });
+    const newProjectUrl = `codex://new?${params.toString()}`;
+    const threadUrl = threadId ? `codex://threads/${encodeURIComponent(threadId)}` : null;
+    const openUrls = existingThreadId && threadUrl ? [threadUrl] : threadUrl ? [newProjectUrl, threadUrl] : [newProjectUrl];
+    const url = openUrls[openUrls.length - 1];
+
+    this.activeProjectId = project.id;
+    this.showProjectChatsFlag = true;
+    this.status =
+      mode === "existing-thread"
+        ? `Opening chat in Codex: ${chat.displayName}`
+        : `Opening project in Codex: ${project.displayName}`;
+    this.emitEvent("app", "chatOpenInCodex", this.status, {
+      projectId: project.id,
+      chatId: chat.id,
+      threadId,
+      mode,
+      projectKnownToCodex,
+      openUrls,
+    });
+    this.emitState();
+    return {
+      url,
+      openUrls,
+      mode,
+      projectKnownToCodex,
+      project,
+      chat,
+    };
   }
 
   async listChats(projectId?: string): Promise<VoiceChat[]> {
@@ -733,6 +784,13 @@ export class VoiceCodexOrchestrator extends EventEmitter {
     }
 
     const project = await this.requireProject();
+    const chat = activeChatForProject(project);
+    if (!chat) throw new Error("Active project does not have an active chat.");
+    return { project, chat };
+  }
+
+  private async requireChatContextForProject(projectId?: string): Promise<ChatContext> {
+    const project = await this.requireProject(projectId);
     const chat = activeChatForProject(project);
     if (!chat) throw new Error("Active project does not have an active chat.");
     return { project, chat };

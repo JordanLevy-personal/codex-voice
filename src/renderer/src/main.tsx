@@ -311,6 +311,7 @@ function VoiceHome({
   const [contextMenu, setContextMenu] = useState<ContextMenuTarget | null>(null);
   const [apiKey, setApiKey] = useState("");
   const [newName, setNewName] = useState("");
+  const [newFolderPath, setNewFolderPath] = useState("");
   const [newChatName, setNewChatName] = useState("");
   const [query, setQuery] = useState("");
   const projects = state.projects;
@@ -405,9 +406,27 @@ function VoiceHome({
   async function createNewProject(event: React.FormEvent<HTMLFormElement>): Promise<void> {
     event.preventDefault();
     await onAction(async () => {
-      await window.codexVoice.createProject(newName || undefined);
+      const folderPath = newFolderPath.trim();
+      if (folderPath) {
+        await window.codexVoice.openProjectFolder(folderPath, newName || undefined);
+      } else {
+        await window.codexVoice.createProject(newName || undefined);
+      }
       setNewName("");
+      setNewFolderPath("");
       setNewOpen(false);
+    });
+  }
+
+  async function chooseProjectFolder(): Promise<void> {
+    await onAction(async () => {
+      const project = await window.codexVoice.openProjectFolder();
+      if (project) {
+        setNewName("");
+        setNewFolderPath("");
+        setNewOpen(false);
+        setBrowseOpen(false);
+      }
     });
   }
 
@@ -434,6 +453,10 @@ function VoiceHome({
       setSwitchChatOpen(false);
       setChatsOpen(true);
     });
+  }
+
+  async function openChatInCodex(chatId?: string): Promise<void> {
+    await onAction(() => window.codexVoice.openChatInCodex(chatId));
   }
 
   function openProjectContextMenu(
@@ -711,6 +734,7 @@ function VoiceHome({
                 onNewChat={() => setNewChatOpen(true)}
                 onSwitchChat={() => setSwitchChatOpen(true)}
                 onSelectChat={switchChat}
+                onOpenChatInCodex={openChatInCodex}
                 onOpenChatMenu={openChatContextMenu}
               />
             ) : (
@@ -718,6 +742,10 @@ function VoiceHome({
                 <button className="voice-action-button" onClick={() => setNewOpen(true)}>
                   <PlusIcon />
                   <span>New project</span>
+                </button>
+                <button className="voice-action-button" onClick={() => void chooseProjectFolder()}>
+                  <FolderIcon />
+                  <span>Open folder</span>
                 </button>
                 <button className="voice-action-button" onClick={() => setBrowseOpen(true)}>
                   <FolderIcon />
@@ -810,12 +838,24 @@ function VoiceHome({
                 placeholder="Voice Project"
               />
             </label>
+            <label className="voice-field">
+              Folder path
+              <input
+                value={newFolderPath}
+                onChange={(event) => setNewFolderPath(event.target.value)}
+                placeholder="/Users/jordanlevy/GitHub/personal/active/apps/MyProject"
+                spellCheck={false}
+              />
+            </label>
             <div className="voice-dialog-actions">
               <button type="button" onClick={() => setNewOpen(false)}>
                 Cancel
               </button>
+              <button type="button" onClick={() => void chooseProjectFolder()}>
+                Choose folder
+              </button>
               <button type="submit" className="voice-primary">
-                Create
+                {newFolderPath.trim() ? "Open" : "Create"}
               </button>
             </div>
           </form>
@@ -840,6 +880,11 @@ function VoiceHome({
                 placeholder="Search projects"
               />
             </label>
+            <div className="voice-dialog-actions">
+              <button type="button" onClick={() => void chooseProjectFolder()}>
+                Open folder
+              </button>
+            </div>
             <div className="browse-list">
               {filteredProjects.map((project) => (
                 <button
@@ -1070,12 +1115,14 @@ function ProjectChatsPanel({
   onNewChat,
   onSwitchChat,
   onSelectChat,
+  onOpenChatInCodex,
   onOpenChatMenu,
 }: {
   chats: ChatSummary[];
   onNewChat: () => void;
   onSwitchChat: () => void;
   onSelectChat: (chatId: string) => Promise<void>;
+  onOpenChatInCodex: (chatId?: string) => Promise<void>;
   onOpenChatMenu: (event: React.MouseEvent<HTMLElement>, chat: ChatSummary) => void;
 }): React.ReactElement {
   const activeChat = chats.find((chat) => chat.active) ?? null;
@@ -1094,10 +1141,18 @@ function ProjectChatsPanel({
       </div>
       <div className="project-chat-list">
         {chats.map((chat) => (
-          <button
+          <div
             key={chat.id}
+            role="button"
+            tabIndex={0}
             className={`project-chat-row ${chat.active ? "active" : ""}`}
             onClick={() => void onSelectChat(chat.id)}
+            onKeyDown={(event) => {
+              if (event.key === "Enter" || event.key === " ") {
+                event.preventDefault();
+                void onSelectChat(chat.id);
+              }
+            }}
             onContextMenu={(event) => onOpenChatMenu(event, chat)}
           >
             <span className={`chat-status-dot ${chat.tone}`} />
@@ -1105,12 +1160,24 @@ function ProjectChatsPanel({
               <strong>{chat.title}</strong>
               <small>{chat.detail}</small>
             </span>
-            {chat.active && (
-              <span className="project-chat-trailing">
+            <span className="project-chat-trailing">
+              {chat.active && (
                 <span className="active-chat-pill">Active</span>
-              </span>
-            )}
-          </button>
+              )}
+              <button
+                type="button"
+                className="project-chat-open-button"
+                aria-label={`Open ${chat.title} in Codex`}
+                title="Open in Codex"
+                onClick={(event) => {
+                  event.stopPropagation();
+                  void onOpenChatInCodex(chat.id);
+                }}
+              >
+                <ExternalIcon />
+              </button>
+            </span>
+          </div>
         ))}
       </div>
       <div className="voice-actions chat-actions">
@@ -1667,6 +1734,15 @@ function SwitchIcon(): React.ReactElement {
   return (
     <svg viewBox="0 0 24 24" aria-hidden="true">
       <path d="M7 7h10l-3-3M17 17H7l3 3M17 7l-4 4M7 17l4-4" />
+    </svg>
+  );
+}
+
+function ExternalIcon(): React.ReactElement {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <path d="M9 5.5H5.75a2 2 0 0 0-2 2v10.75a2 2 0 0 0 2 2h10.75a2 2 0 0 0 2-2V15" />
+      <path d="M14 4h6v6M12.75 11.25 20 4" />
     </svg>
   );
 }

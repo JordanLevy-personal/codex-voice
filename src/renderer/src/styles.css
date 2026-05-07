@@ -1073,6 +1073,7 @@ code {
   border-radius: 0;
   padding: 10px 13px;
   text-align: left;
+  cursor: pointer;
 }
 
 .project-chat-row + .project-chat-row {
@@ -1126,6 +1127,27 @@ code {
   align-items: center;
   justify-content: flex-end;
   gap: 10px;
+}
+
+.project-chat-open-button {
+  display: inline-grid;
+  width: 30px;
+  height: 30px;
+  place-items: center;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.05);
+  color: rgba(242, 246, 252, 0.78);
+}
+
+.project-chat-open-button:hover {
+  background: rgba(255, 255, 255, 0.1);
+  color: rgba(255, 255, 255, 0.95);
+}
+
+.project-chat-open-button svg {
+  width: 16px;
+  height: 16px;
 }
 
 .active-chat-pill {

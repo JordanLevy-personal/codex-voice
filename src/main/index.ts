@@ -1,4 +1,4 @@
-import { app, BrowserWindow, ipcMain } from "electron";
+import { app, BrowserWindow, dialog, ipcMain, shell, type OpenDialogOptions } from "electron";
 import path from "node:path";
 import { clearOpenAiApiKey, saveOpenAiApiKey } from "./apiKeyStore";
 import appIcon from "./assets/app-icon.png?asset";
@@ -16,6 +16,7 @@ import type {
 } from "../shared/types";
 
 const maxBufferedEvents = 250;
+const codexOpenSequenceDelayMs = 900;
 
 let voiceWindow: BrowserWindow | null = null;
 let debugWindow: BrowserWindow | null = null;
@@ -153,6 +154,12 @@ function registerIpcHandler(
   ipcMain.handle(channel, listener);
 }
 
+function wait(ms: number): Promise<void> {
+  return new Promise((resolve) => {
+    setTimeout(resolve, ms);
+  });
+}
+
 app.whenReady().then(() => {
   app.dock?.setIcon(appIcon);
   registerIpc();
@@ -188,6 +195,23 @@ function registerIpc(): void {
     (_event, payload: { name?: string }) => requireOrchestrator().createProject(payload.name),
   );
   registerIpcHandler(
+    "projects:openFolder",
+    async (_event, payload?: { folderPath?: string; name?: string }) => {
+      const folderPath = payload?.folderPath?.trim();
+      if (folderPath) return requireOrchestrator().openProjectFolder(folderPath, payload?.name);
+
+      const dialogOptions: OpenDialogOptions = {
+        title: "Open Codex project folder",
+        properties: ["openDirectory", "createDirectory"],
+      };
+      const result = voiceWindow
+        ? await dialog.showOpenDialog(voiceWindow, dialogOptions)
+        : await dialog.showOpenDialog(dialogOptions);
+      if (result.canceled || result.filePaths.length === 0) return null;
+      return requireOrchestrator().openProjectFolder(result.filePaths[0], payload?.name);
+    },
+  );
+  registerIpcHandler(
     "projects:resume",
     (_event, payload: { projectId: string }) => requireOrchestrator().resumeProject(payload.projectId),
   );
@@ -218,6 +242,17 @@ function registerIpc(): void {
     "projects:restoreChat",
     (_event, payload: { chatId: string; projectId?: string }) =>
       requireOrchestrator().restoreChat(payload.chatId, payload.projectId),
+  );
+  registerIpcHandler(
+    "projects:openChatInCodex",
+    async (_event, payload?: { chatId?: string; projectId?: string }) => {
+      const result = await requireOrchestrator().openChatInCodex(payload?.chatId, payload?.projectId);
+      for (const [index, url] of result.openUrls.entries()) {
+        if (index > 0) await wait(codexOpenSequenceDelayMs);
+        await shell.openExternal(url);
+      }
+      return result;
+    },
   );
   registerIpcHandler(
     "projects:listChats",

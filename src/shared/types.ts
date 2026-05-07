@@ -234,6 +234,15 @@ export type CodexActionResult = {
   chat: VoiceChat | null;
 };
 
+export type CodexOpenChatResult = {
+  url: string;
+  openUrls: string[];
+  mode: "existing-thread" | "new-project";
+  projectKnownToCodex: boolean;
+  project: VoiceProject;
+  chat: VoiceChat;
+};
+
 export type AppEvent = {
   at: string;
   source: "app" | "codex" | "realtime";
@@ -264,6 +273,7 @@ export type CodexVoiceApi = {
   clearEvents(): Promise<void>;
   logEvent(event: AppEvent): Promise<void>;
   createProject(name?: string): Promise<VoiceProject>;
+  openProjectFolder(folderPath?: string, name?: string): Promise<VoiceProject | null>;
   resumeProject(projectId: string): Promise<VoiceProject>;
   archiveProject(projectId: string): Promise<VoiceProject>;
   restoreProject(projectId: string): Promise<VoiceProject>;
@@ -271,6 +281,7 @@ export type CodexVoiceApi = {
   switchChat(chatId: string, projectId?: string): Promise<VoiceProject>;
   archiveChat(chatId: string, projectId?: string): Promise<VoiceProject>;
   restoreChat(chatId: string, projectId?: string): Promise<VoiceProject>;
+  openChatInCodex(chatId?: string, projectId?: string): Promise<CodexOpenChatResult>;
   listChats(projectId?: string): Promise<VoiceChat[]>;
   showProjectChats(open?: boolean): Promise<void>;
   summarizeProject(projectId?: string, chatId?: string): Promise<string>;

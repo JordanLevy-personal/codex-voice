@@ -18,6 +18,8 @@ const api: CodexVoiceApi = {
   clearEvents: () => ipcRenderer.invoke("app:clearEvents"),
   logEvent: (event: AppEvent) => ipcRenderer.invoke("app:logEvent", event),
   createProject: (name?: string) => ipcRenderer.invoke("projects:create", { name }),
+  openProjectFolder: (folderPath?: string, name?: string) =>
+    ipcRenderer.invoke("projects:openFolder", { folderPath, name }),
   resumeProject: (projectId: string) => ipcRenderer.invoke("projects:resume", { projectId }),
   archiveProject: (projectId: string) => ipcRenderer.invoke("projects:archive", { projectId }),
   restoreProject: (projectId: string) => ipcRenderer.invoke("projects:restore", { projectId }),
@@ -29,6 +31,8 @@ const api: CodexVoiceApi = {
     ipcRenderer.invoke("projects:archiveChat", { chatId, projectId }),
   restoreChat: (chatId: string, projectId?: string) =>
     ipcRenderer.invoke("projects:restoreChat", { chatId, projectId }),
+  openChatInCodex: (chatId?: string, projectId?: string) =>
+    ipcRenderer.invoke("projects:openChatInCodex", { chatId, projectId }),
   listChats: (projectId?: string) => ipcRenderer.invoke("projects:listChats", { projectId }),
   showProjectChats: (open?: boolean) => ipcRenderer.invoke("projects:showChats", { open }),
   summarizeProject: (projectId?: string, chatId?: string) =>

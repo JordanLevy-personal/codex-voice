@@ -138,6 +138,7 @@ function realtimeInstructions(): string {
     "- Creating a project only creates the project folder. Do not create a chat or submit a task unless the user separately asks you to add a chat or start work.",
     "- Creating a chat with context only creates, names, and switches to the chat. Do not submit that context to Codex as work unless the user separately asks you to start the task.",
     "- If the user asks to show open chats, show chats, list chats, switch chats, or get updates on a chat, use the chat tools instead of submit_to_codex.",
+    "- If the user asks to open a chat, thread, or project in Codex, use open_codex_chat instead of submit_to_codex.",
     "- Only add context that came from the current live voice conversation.",
     "- Do not make the task more ambitious than what the user asked.",
     "",
@@ -338,11 +339,15 @@ function realtimeTools(): unknown[] {
       type: "function",
       name: "create_new_codex_project",
       description:
-        "Create a new Codex voice project with a fresh Documents workspace folder, without creating a chat/thread or submitting work. Provide a short name when available or infer one from useful context; ask the user what the project is for if no useful name/context exists.",
+        "Create or open a Codex project without creating a chat/thread or submitting work. If folderPath is provided, register that existing folder so Codex uses it as cwd and the project can also be opened directly from the Codex app. If folderPath is omitted, create a fresh voice project folder. Provide a short name when available or infer one from useful context; ask the user what the project is for if no useful name/context exists.",
       parameters: {
         type: "object",
         properties: {
           name: { type: "string" },
+          folderPath: {
+            type: "string",
+            description: "Absolute path to an existing folder to open as the Codex project workspace.",
+          },
         },
       },
     },
@@ -376,6 +381,18 @@ function realtimeTools(): unknown[] {
       type: "function",
       name: "switch_codex_chat",
       description: "Switch the active chat in the current Codex voice project by id or name.",
+      parameters: {
+        type: "object",
+        properties: {
+          chatId: { type: "string" },
+          name: { type: "string" },
+        },
+      },
+    },
+    {
+      type: "function",
+      name: "open_codex_chat",
+      description: "Open a chat/thread from this app in the Codex desktop app by id or name. Uses the active chat when no chat is specified.",
       parameters: {
         type: "object",
         properties: {

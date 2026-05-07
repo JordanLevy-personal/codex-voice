@@ -107,6 +107,55 @@ export class ProjectStore {
     return project;
   }
 
+  async openProjectFolder(folderPath: string, displayName?: string): Promise<VoiceProject> {
+    const resolvedFolderPath = path.resolve(folderPath);
+    const folderStats = await stat(resolvedFolderPath);
+    if (!folderStats.isDirectory()) {
+      throw new Error(`Project path is not a directory: ${resolvedFolderPath}`);
+    }
+
+    const existing = await this.getProjectByFolderPath(resolvedFolderPath, { includeArchived: true });
+    if (existing) {
+      return this.upsertProject({
+        ...existing,
+        displayName: displayName?.trim() || existing.displayName,
+        archivedAt: null,
+        lastStatus: "Opened project folder.",
+      });
+    }
+
+    const sidecar = await this.readProjectSidecar(resolvedFolderPath);
+    if (sidecar) {
+      return this.upsertProject({
+        ...sidecar,
+        folderPath: resolvedFolderPath,
+        displayName: displayName?.trim() || sidecar.displayName || folderDisplayName(resolvedFolderPath),
+        archivedAt: null,
+        lastStatus: "Opened project folder.",
+      });
+    }
+
+    const now = new Date().toISOString();
+    const project: VoiceProject = {
+      id: randomUUID(),
+      displayName: displayName?.trim() || folderDisplayName(resolvedFolderPath),
+      folderPath: resolvedFolderPath,
+      activeChatId: null,
+      chats: [],
+      codexThreadId: null,
+      model: null,
+      reasoningEffort: null,
+      permissionMode: DEFAULT_CODEX_PERMISSION_MODE,
+      createdAt: now,
+      updatedAt: now,
+      archivedAt: null,
+      lastSummary: null,
+      lastStatus: "Opened project folder.",
+    };
+
+    return this.upsertProject(project);
+  }
+
   async upsertProject(project: VoiceProject): Promise<VoiceProject> {
     return this.enqueueMutation(async () => {
       await mkdir(project.folderPath, { recursive: true });
@@ -128,6 +177,12 @@ export class ProjectStore {
       throw new Error(`Unknown voice project: ${id}`);
     }
     return this.upsertProject({ ...existing, ...patch });
+  }
+
+  async getProjectByFolderPath(folderPath: string, options: ListProjectsOptions = {}): Promise<VoiceProject | null> {
+    const resolvedFolderPath = path.resolve(folderPath);
+    const projects = await this.listProjects(options);
+    return projects.find((project) => path.resolve(project.folderPath) === resolvedFolderPath) ?? null;
   }
 
   async archiveProject(id: string): Promise<VoiceProject> {
@@ -344,6 +399,16 @@ export class ProjectStore {
     return projects.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
   }
 
+  private async readProjectSidecar(folderPath: string): Promise<VoiceProject | null> {
+    const projectPath = path.join(folderPath, PROJECT_FILE);
+    if (!existsSync(projectPath)) return null;
+    try {
+      return normalizeProject(JSON.parse(await readFile(projectPath, "utf8")));
+    } catch {
+      return null;
+    }
+  }
+
   private async writeJsonAtomic(filePath: string, value: unknown): Promise<void> {
     const tempPath = `${filePath}.${process.pid}.${Date.now()}-${randomUUID()}.tmp`;
     try {
@@ -535,6 +600,10 @@ function sanitizeProjectName(name: string): string {
     .slice(0, 64)
     .replace(/\s/g, "-")
     .toLowerCase() || "voice-project";
+}
+
+function folderDisplayName(folderPath: string): string {
+  return path.basename(folderPath) || folderPath;
 }
 
 function formatFolderTimestamp(date: Date): string {

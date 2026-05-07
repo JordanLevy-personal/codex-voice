@@ -56,6 +56,11 @@ The voice window also includes a Realtime model toggle for switching between
 `gpt-realtime-1.5` and `gpt-realtime-2`. `OPENAI_REALTIME_MODEL` overrides the
 in-app toggle when set.
 
+Projects can either be created in the default voice-projects folder or opened
+from an existing folder anywhere on disk. Opened folders get a
+`.codex-voice-project.json` sidecar and are passed to Codex as the chat working
+directory, so the same workspace can also be opened directly from the Codex app.
+
 ## Development
 
 Run the app in development mode:

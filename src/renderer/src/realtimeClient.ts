@@ -404,7 +404,10 @@ async function callVoiceTool(name: string, args: Record<string, unknown>): Promi
   }
 
   if (name === "create_new_codex_project") {
-    const project = await window.codexVoice.createProject(optionalString(args.name));
+    const folderPath = optionalString(args.folderPath);
+    const project = folderPath
+      ? await window.codexVoice.openProjectFolder(folderPath, optionalString(args.name))
+      : await window.codexVoice.createProject(optionalString(args.name));
     return { ok: true, project };
   }
 
@@ -429,6 +432,12 @@ async function callVoiceTool(name: string, args: Record<string, unknown>): Promi
     if (!chatId) throw new Error("No chat matched that request.");
     const project = await window.codexVoice.switchChat(chatId);
     return { ok: true, message: "Switched active chat.", project, activeChat: activeChat(visibleChats(project.chats), project.activeChatId) };
+  }
+
+  if (name === "open_codex_chat") {
+    const chatId = await resolveChatId(optionalString(args.chatId), optionalString(args.name), true);
+    const result = await window.codexVoice.openChatInCodex(chatId);
+    return { ok: true, message: "Opened chat in Codex.", ...result };
   }
 
   if (name === "get_codex_chat_status") {
