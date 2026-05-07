@@ -14,6 +14,9 @@ export type CodexPermissionProfile = {
 export const DEFAULT_CODEX_MODEL = "gpt-5.5";
 export const DEFAULT_CODEX_REASONING_EFFORT: ReasoningEffort = "medium";
 export const DEFAULT_CODEX_PERMISSION_MODE: CodexPermissionMode = "default";
+export const DEFAULT_REALTIME_MODEL = "gpt-realtime-2";
+export const DEFAULT_REALTIME_VOICE = "marin";
+export const DEFAULT_REALTIME_REASONING_EFFORT = "low";
 
 export const CODEX_PERMISSION_PROFILES: CodexPermissionProfile[] = [
   {
@@ -213,6 +216,7 @@ export type AppState = {
     available: boolean;
     model: string;
     voice: string;
+    reasoningEffort: string | null;
     reason: string | null;
     apiKeySource: "environment" | "saved" | null;
     apiKeyEncrypted: boolean;
@@ -247,6 +251,7 @@ export type RealtimeClientSecret = {
   expiresAt?: number;
   model: string;
   voice: string;
+  reasoningEffort?: string | null;
 };
 
 export type CodexVoiceApi = {

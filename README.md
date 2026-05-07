@@ -44,9 +44,13 @@ Configure an OpenAI API key in one of two ways:
 Optional Realtime settings:
 
 ```sh
-export OPENAI_REALTIME_MODEL=gpt-realtime-1.5
+export OPENAI_REALTIME_MODEL=gpt-realtime-2
 export OPENAI_REALTIME_VOICE=marin
+export OPENAI_REALTIME_REASONING_EFFORT=low
 ```
+
+`OPENAI_REALTIME_REASONING_EFFORT` applies to `gpt-realtime-2` sessions and
+accepts `minimal`, `low`, `medium`, or `high`.
 
 ## Development
 

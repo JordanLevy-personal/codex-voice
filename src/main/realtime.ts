@@ -1,24 +1,29 @@
 import type { RealtimeClientSecret } from "../shared/types";
+import { DEFAULT_REALTIME_MODEL, DEFAULT_REALTIME_REASONING_EFFORT, DEFAULT_REALTIME_VOICE } from "../shared/types";
 import { getOpenAiApiKey, getOpenAiApiKeyStatus } from "./apiKeyStore";
 
 const REALTIME_ENDPOINT = "https://api.openai.com/v1/realtime/client_secrets";
+const REALTIME_REASONING_EFFORTS = new Set(["minimal", "low", "medium", "high"]);
 
 export function realtimeConfig(): {
   available: boolean;
   model: string;
   voice: string;
+  reasoningEffort: string | null;
   reason: string | null;
   apiKeySource: "environment" | "saved" | null;
   apiKeyEncrypted: boolean;
 } {
-  const model = process.env.OPENAI_REALTIME_MODEL || "gpt-realtime-1.5";
-  const voice = process.env.OPENAI_REALTIME_VOICE || "marin";
+  const model = process.env.OPENAI_REALTIME_MODEL || DEFAULT_REALTIME_MODEL;
+  const voice = process.env.OPENAI_REALTIME_VOICE || DEFAULT_REALTIME_VOICE;
+  const reasoningEffort = realtimeReasoningEffort(model);
   const status = getOpenAiApiKeyStatus();
   const available = status.configured;
   return {
     available,
     model,
     voice,
+    reasoningEffort,
     reason: available
       ? null
       : "Add an OpenAI API key from the menu to enable Realtime voice.",
@@ -34,6 +39,31 @@ export async function createRealtimeClientSecret(): Promise<RealtimeClientSecret
     throw new Error(config.reason ?? "Missing OPENAI_API_KEY.");
   }
 
+  const session: Record<string, unknown> = {
+    type: "realtime",
+    model: config.model,
+    output_modalities: ["audio"],
+    instructions: realtimeInstructions(),
+    audio: {
+      input: {
+        turn_detection: {
+          type: "semantic_vad",
+        },
+      },
+      output: {
+        voice: config.voice,
+      },
+    },
+    tools: realtimeTools(),
+    tool_choice: "auto",
+  };
+
+  if (config.reasoningEffort) {
+    session.reasoning = {
+      effort: config.reasoningEffort,
+    };
+  }
+
   const response = await fetch(REALTIME_ENDPOINT, {
     method: "POST",
     headers: {
@@ -41,24 +71,7 @@ export async function createRealtimeClientSecret(): Promise<RealtimeClientSecret
       "Content-Type": "application/json",
     },
     body: JSON.stringify({
-      session: {
-        type: "realtime",
-        model: config.model,
-        output_modalities: ["audio"],
-        instructions: realtimeInstructions(),
-        audio: {
-          input: {
-            turn_detection: {
-              type: "semantic_vad",
-            },
-          },
-          output: {
-            voice: config.voice,
-          },
-        },
-        tools: realtimeTools(),
-        tool_choice: "auto",
-      },
+      session,
     }),
   });
 
@@ -83,7 +96,25 @@ export async function createRealtimeClientSecret(): Promise<RealtimeClientSecret
     expiresAt: data.expires_at ?? data.client_secret?.expires_at,
     model: config.model,
     voice: config.voice,
+    reasoningEffort: config.reasoningEffort,
   };
+}
+
+function realtimeReasoningEffort(model: string): string | null {
+  if (!supportsRealtimeReasoning(model)) return null;
+
+  const effort = process.env.OPENAI_REALTIME_REASONING_EFFORT || DEFAULT_REALTIME_REASONING_EFFORT;
+  if (!REALTIME_REASONING_EFFORTS.has(effort)) {
+    throw new Error(
+      `Invalid OPENAI_REALTIME_REASONING_EFFORT "${effort}". Expected minimal, low, medium, or high.`,
+    );
+  }
+
+  return effort;
+}
+
+function supportsRealtimeReasoning(model: string): boolean {
+  return model === "gpt-realtime-2" || model.startsWith("gpt-realtime-2-");
 }
 
 function realtimeInstructions(): string {

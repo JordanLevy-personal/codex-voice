@@ -62,7 +62,8 @@ export class RealtimeVoiceClient {
       this.dc = dc;
       dc.addEventListener("open", () => {
         this.setPaused(false);
-        this.callbacks.onConnectionChange(true, `Connected to ${secret.model} (${secret.voice}).`);
+        const reasoning = secret.reasoningEffort ? `, reasoning ${secret.reasoningEffort}` : "";
+        this.callbacks.onConnectionChange(true, `Connected to ${secret.model} (${secret.voice}${reasoning}).`);
         this.log("connection", "Realtime data channel opened.");
       });
       dc.addEventListener("close", () => {

@@ -5,6 +5,8 @@ import {
   DEFAULT_CODEX_MODEL,
   DEFAULT_CODEX_PERMISSION_MODE,
   DEFAULT_CODEX_REASONING_EFFORT,
+  DEFAULT_REALTIME_MODEL,
+  DEFAULT_REALTIME_VOICE,
   type AppEvent,
   type AppState,
   type CodexModelSummary,
@@ -55,8 +57,9 @@ const emptyState: AppState = {
   },
   realtime: {
     available: false,
-    model: "gpt-realtime-1.5",
-    voice: "marin",
+    model: DEFAULT_REALTIME_MODEL,
+    voice: DEFAULT_REALTIME_VOICE,
+    reasoningEffort: null,
     reason: null,
     apiKeySource: null,
     apiKeyEncrypted: false,
@@ -1307,7 +1310,9 @@ function DebugDashboard({
           </div>
           <p className="help">
             {state.realtime.available
-              ? `Realtime voice is controlled from the main Codex Voice window. Model: ${state.realtime.model}, voice: ${state.realtime.voice}.`
+              ? `Realtime voice is controlled from the main Codex Voice window. Model: ${state.realtime.model}, voice: ${
+                  state.realtime.voice
+                }${state.realtime.reasoningEffort ? `, reasoning: ${state.realtime.reasoningEffort}` : ""}.`
               : state.realtime.reason}
           </p>
 
